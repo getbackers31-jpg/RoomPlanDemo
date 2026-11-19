@@ -4,25 +4,36 @@ import RoomPlan
 import SceneKit
 
 struct RoomCaptureScanView: View {
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: RoomCaptureViewModel = .init()
     @StateObject private var floorPlanViewModel = FloorPlanViewModel()
     @StateObject private var mockDataManager = MockDataManager()
     
     @State private var isEditingUsage: Bool = false
     @State private var draftUsage: String = ""
+    @State private var draftFloor: String = "1F"
+    @State private var loadedSavedRoom: CapturedRoom? = nil
     
     private let isDemo: Bool
+    private let savedProject: SavedRoomProject?
     
-    init(isDemo: Bool = false) {
+    init(isDemo: Bool = false, savedProject: SavedRoomProject? = nil) {
         self.isDemo = isDemo
+        self.savedProject = savedProject
+    }
+    
+    private var isDisplayingBlueprint: Bool {
+        isDemo || savedProject != nil || viewModel.isShowingFloorPlan
     }
     
     var body: some View {
         ZStack {
             mainRoomView
             
-            if isDemo || viewModel.isShowingFloorPlan {
+            if isDisplayingBlueprint {
                 blueprintOverlay
+            } else {
+                liveScanOverlay
             }
             
             if floorPlanViewModel.selectedObject != nil {
@@ -46,14 +57,29 @@ struct RoomCaptureScanView: View {
             }
         }
         .onAppear {
-            if !isDemo { viewModel.startSession() }
+            if let project = savedProject {
+                floorPlanViewModel.savedProjectID = project.id
+                floorPlanViewModel.roomUsage = project.name
+                floorPlanViewModel.floorLabel = project.floorLabel
+                floorPlanViewModel.roomAreaPing = project.areaPing
+                floorPlanViewModel.roomAreaSqm = project.areaSqm
+                floorPlanViewModel.initialEditState = RoomProjectStore.shared.loadEditState(for: project)
+                loadedSavedRoom = RoomProjectStore.shared.loadCapturedRoom(for: project)
+            } else if !isDemo {
+                viewModel.startSession()
+            }
         }
-        .alert("編輯空間用途", isPresented: $isEditingUsage) {
-            TextField("例如：客廳、主臥室、書房", text: $draftUsage)
+        .alert("編輯空間資訊", isPresented: $isEditingUsage) {
+            TextField("空間名稱（如：客廳、主臥室）", text: $draftUsage)
+            TextField("樓層（如：1F、2F）", text: $draftFloor)
             Button("儲存") {
-                let trimmed = draftUsage.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    floorPlanViewModel.roomUsage = trimmed
+                let trimmedName = draftUsage.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedName.isEmpty {
+                    floorPlanViewModel.roomUsage = trimmedName
+                }
+                let trimmedFloor = draftFloor.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedFloor.isEmpty {
+                    floorPlanViewModel.floorLabel = trimmedFloor
                 }
             }
             Button("取消", role: .cancel) {}
@@ -99,17 +125,85 @@ struct RoomCaptureScanView: View {
 }
 
 private extension RoomCaptureScanView {
+    var liveScanOverlay: some View {
+        VStack {
+            HStack(spacing: 8) {
+                Image(systemName: "viewfinder")
+                    .foregroundColor(Color(red: 0.96, green: 0.84, blue: 0.56))
+                Text(viewModel.isScanning
+                     ? "緩慢平穩掃描四周牆面、門窗與家具，完成後點擊右上角結束掃描"
+                     : "掃描已完成，可檢視 2D 藍圖或匯出 3D 模型")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.white)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Color.black.opacity(0.72))
+            .clipShape(Capsule())
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            
+            Spacer()
+            
+            if !viewModel.isScanning {
+                Button {
+                    floorPlanViewModel.autoOrthogonalizeOnLoad = true
+                    viewModel.handleScanButtonTap()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "wand.and.stars")
+                        Text("檢視 2D 藍圖並自動直角對齊")
+                            .fontWeight(.bold)
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 13)
+                    .background(AppTheme.accentBlue)
+                    .clipShape(Capsule())
+                    .shadow(color: .black.opacity(0.28), radius: 6, y: 3)
+                }
+                .padding(.bottom, 28)
+            }
+        }
+    }
+    
     var blueprintOverlay: some View {
         VStack(spacing: 8) {
-            // 1. 頂部面積坪數與用途資訊卡
-            HStack(spacing: 12) {
+            // 1. 頂部面積坪數、用途資訊卡與一鍵存檔按鈕
+            HStack(spacing: 10) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.14))
+                        .clipShape(Circle())
+                }
+                
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
+                        Text(floorPlanViewModel.floorLabel)
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(AppTheme.accentBlue)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        
                         Text(floorPlanViewModel.roomUsage)
                             .font(.headline)
                             .foregroundColor(.white)
+                            .lineLimit(1)
+                        
                         Button {
                             draftUsage = floorPlanViewModel.roomUsage
+                            draftFloor = floorPlanViewModel.floorLabel
                             isEditingUsage = true
                         } label: {
                             Image(systemName: "pencil.circle.fill")
@@ -119,23 +213,32 @@ private extension RoomCaptureScanView {
                     }
                     
                     Text(String(format: "室內實測：約 %.2f 坪 (%.1f ㎡)", floorPlanViewModel.roomAreaPing, floorPlanViewModel.roomAreaSqm))
-                        .font(.subheadline)
+                        .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundColor(Color(red: 0.96, green: 0.84, blue: 0.56))
                 }
+                
                 Spacer()
-                Text("單位: cm")
-                    .font(.caption2)
+                
+                Button {
+                    floorPlanViewModel.shouldSaveProject = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: floorPlanViewModel.savedProjectID == nil ? "square.and.arrow.down.fill" : "checkmark.circle.fill")
+                        Text(floorPlanViewModel.savedProjectID == nil ? "儲存" : "更新")
+                    }
+                    .font(.caption)
                     .fontWeight(.bold)
-                    .foregroundColor(.white.opacity(0.85))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.15))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 7)
+                    .background(AppTheme.accentAmber)
                     .clipShape(Capsule())
+                }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(AppTheme.primaryBarBg.opacity(0.94))
+            .background(AppTheme.primaryBarBg.opacity(0.95))
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
             .padding(.horizontal, 12)
@@ -193,7 +296,7 @@ private extension RoomCaptureScanView {
                     .foregroundColor(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.8))
+                    .background(Color.black.opacity(0.82))
                     .clipShape(Capsule())
                     .transition(.opacity)
                     .onAppear {
@@ -300,7 +403,19 @@ private extension RoomCaptureScanView {
     
     @ViewBuilder
     var mainRoomView: some View {
-        if isDemo {
+        if savedProject != nil {
+            if let room = loadedSavedRoom {
+                FloorPlanSceneView(capturedRoom: room, viewModel: floorPlanViewModel)
+                    .ignoresSafeArea()
+            } else {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("載入空間藍圖中...")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+            }
+        } else if isDemo {
             if let finalRoom = mockDataManager.loadCapturedRoom() {
                 FloorPlanSceneView(capturedRoom: finalRoom, viewModel: floorPlanViewModel)
                     .ignoresSafeArea()
@@ -314,6 +429,10 @@ private extension RoomCaptureScanView {
                 RoomCaptureRepresentable(roomCaptureView: viewModel.roomCaptureView)
                     .ignoresSafeArea()
                     .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("取消") { dismiss() }
+                                .foregroundColor(.white)
+                        }
                         ToolbarItem(placement: .topBarTrailing) { scanButtonView }
                         if !viewModel.isScanning {
                             ToolbarItem(placement: .topBarTrailing) { shareButtonView }

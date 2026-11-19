@@ -54,6 +54,16 @@ final class FloorPlanScene: SKScene {
         drawBlueprintGrid()
         drawSurfaces()
         drawObjects()
+        
+        if let savedState = viewModel.initialEditState {
+            applyEditState(savedState)
+        } else if viewModel.autoOrthogonalizeOnLoad {
+            orthogonalizeWalls()
+            DispatchQueue.main.async { [weak self] in
+                self?.viewModel.autoOrthogonalizeOnLoad = false
+            }
+        }
+        
         recalculateAreaAndExteriorDimensions()
         recenterCamera(animated: false)
     }
@@ -78,6 +88,82 @@ final class FloorPlanScene: SKScene {
     }
 }
 
+// MARK: - 第二階段：專案存檔與狀態還原
+extension FloorPlanScene {
+    func exportEditState() -> FloorPlanEditState {
+        var surfaceMap: [String: SavedSurfaceState] = [:]
+        for node in children.compactMap({ $0 as? FloorPlanSurface }) {
+            let key = node.capturedSurface.identifier.uuidString
+            surfaceMap[key] = SavedSurfaceState(
+                x: Double(node.position.x),
+                y: Double(node.position.y),
+                zRotation: Double(node.zRotation),
+                halfLength: Double(node.halfLength)
+            )
+        }
+        var objectMap: [String: SavedObjectState] = [:]
+        for obj in children.compactMap({ $0 as? FloorPlanObject }) {
+            let key = obj.capturedObject.identifier.uuidString
+            objectMap[key] = SavedObjectState(
+                x: Double(obj.position.x),
+                y: Double(obj.position.y),
+                zRotation: Double(obj.zRotation),
+                xScale: Double(obj.xScale),
+                yScale: Double(obj.yScale)
+            )
+        }
+        return FloorPlanEditState(
+            surfaces: surfaceMap,
+            objects: objectMap,
+            cameraRotation: Double(camera?.zRotation ?? 0)
+        )
+    }
+    
+    func applyEditState(_ state: FloorPlanEditState) {
+        for node in children.compactMap({ $0 as? FloorPlanSurface }) {
+            let key = node.capturedSurface.identifier.uuidString
+            if let s = state.surfaces[key] {
+                node.position = CGPoint(x: s.x, y: s.y)
+                node.zRotation = CGFloat(s.zRotation)
+                node.halfLength = CGFloat(s.halfLength)
+                node.updateDimensionLabel()
+            }
+        }
+        for obj in children.compactMap({ $0 as? FloorPlanObject }) {
+            let key = obj.capturedObject.identifier.uuidString
+            if let o = state.objects[key] {
+                obj.position = CGPoint(x: o.x, y: o.y)
+                obj.zRotation = CGFloat(o.zRotation)
+                obj.xScale = CGFloat(o.xScale)
+                obj.yScale = CGFloat(o.yScale)
+                obj.updateSizeLabel()
+            }
+        }
+        camera?.zRotation = CGFloat(state.cameraRotation)
+    }
+    
+    func saveCurrentProject() {
+        let editState = exportEditState()
+        let saved = RoomProjectStore.shared.saveProject(
+            existingID: viewModel.savedProjectID,
+            name: viewModel.roomUsage,
+            floorLabel: viewModel.floorLabel,
+            areaPing: viewModel.roomAreaPing,
+            areaSqm: viewModel.roomAreaSqm,
+            capturedRoom: capturedRoom,
+            editState: editState
+        )
+        DispatchQueue.main.async { [weak self] in
+            if let project = saved {
+                self?.viewModel.savedProjectID = project.id
+                self?.viewModel.statusToastMessage = "已儲存「\(project.name)」至空間紀錄庫！"
+            } else {
+                self?.viewModel.statusToastMessage = "儲存失敗，請稍後再試"
+            }
+        }
+    }
+}
+
 // MARK: - 藍圖格線、面積坪數計算與外圍工程尺寸線
 extension FloorPlanScene {
     private func drawBlueprintGrid() {
@@ -86,8 +172,8 @@ extension FloorPlanScene {
         container.zPosition = DrawParameters.gridZPosition
         
         let extent: CGFloat = 4000
-        let minorStep: CGFloat = 100 // 50 cm
-        let majorStep: CGFloat = 200 // 100 cm (1 m)
+        let minorStep: CGFloat = 100
+        let majorStep: CGFloat = 200
         
         let minorPath = CGMutablePath()
         let majorPath = CGMutablePath()

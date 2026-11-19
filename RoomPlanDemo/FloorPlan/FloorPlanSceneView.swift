@@ -90,5 +90,12 @@ struct FloorPlanSceneView: UIViewRepresentable {
                 viewModel.shouldRedo = false
             }
         }
+        
+        if viewModel.shouldSaveProject {
+            DispatchQueue.main.async {
+                scene.saveCurrentProject()
+                viewModel.shouldSaveProject = false
+            }
+        }
     }
 }

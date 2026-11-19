@@ -1,0 +1,37 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: 1. 下載專案程式碼
+        uses: actions/checkout@v4
+
+      - name: 2. 編譯 iOS App（免簽章模式）
+        run: |
+          xcodebuild -project RoomPlanDemo.xcodeproj \
+            -scheme RoomPlanDemo \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: 3. 打包成 .ipa 安裝檔
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/*.app Payload/
+          zip -r RoomPlanDemo.ipa Payload
+
+      - name: 4. 上傳 .ipa 供下載
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoomPlanDemo-IPA
+          path: RoomPlanDemo.ipa

@@ -107,22 +107,28 @@ private extension SurfaceDetailsView {
         if let surface {
             switch type {
             case .measurements:
-                if [.wall, .window, .door].contains(surface.capturedSurface.category) {
+                switch surface.capturedSurface.category {
+                case .wall, .window, .door:
                     Button { withAnimation { selectedType = type } } label: {
                         VStack {
                             Image(systemName: type.buttonImageName).resizable().frame(width: 40, height: 40).foregroundStyle(.white)
                             Text(type.description).foregroundStyle(.white)
                         }
                     }
+                default:
+                    EmptyView()
                 }
             case .doorDirection:
-                if [.window, .door].contains(surface.capturedSurface.category) {
+                switch surface.capturedSurface.category {
+                case .window, .door:
                     Button { withAnimation { selectedType = type } } label: {
                         VStack {
                             Image(systemName: type.buttonImageName).resizable().frame(width: 40, height: 40).foregroundStyle(.white)
                             Text(type.description).foregroundStyle(.white)
                         }
                     }
+                default:
+                    EmptyView()
                 }
             case .delete:
                 Button {

@@ -3,6 +3,26 @@ import SpriteKit
 import RealityKit
 import SwiftUI
 
+private struct SurfaceSnapshot {
+    let position: CGPoint
+    let zRotation: CGFloat
+    let halfLength: CGFloat
+    let openDirection: OpenDirection
+}
+
+private struct ObjectSnapshot {
+    let position: CGPoint
+    let zRotation: CGFloat
+    let xScale: CGFloat
+    let yScale: CGFloat
+}
+
+private struct SceneSnapshot {
+    let surfaces: [ObjectIdentifier: SurfaceSnapshot]
+    let objects: [ObjectIdentifier: ObjectSnapshot]
+    let cameraRotation: CGFloat
+}
+
 final class FloorPlanScene: SKScene {
     let viewModel: FloorPlanViewModel
     private var previousCameraScale = CGFloat()
@@ -11,6 +31,13 @@ final class FloorPlanScene: SKScene {
     private let surfaces: [CapturedRoom.Surface]
     private let objects: [CapturedRoom.Object]
     private let capturedRoom: CapturedRoom
+    
+    private var gridNode: SKNode?
+    private var exteriorDimensionsNode: SKNode?
+    
+    private var undoStack: [SceneSnapshot] = []
+    private var redoStack: [SceneSnapshot] = []
+    private var isDraggingObject: Bool = false
     
     init(capturedRoom: CapturedRoom, viewModel: FloorPlanViewModel) {
         self.capturedRoom = capturedRoom
@@ -24,8 +51,11 @@ final class FloorPlanScene: SKScene {
         self.backgroundColor = DrawParameters.floorPlanBackgroundColor
         
         addCamera()
+        drawBlueprintGrid()
         drawSurfaces()
         drawObjects()
+        recalculateAreaAndExteriorDimensions()
+        recenterCamera(animated: false)
     }
     
     required init?(coder aDecoder: NSCoder) {
@@ -48,12 +78,369 @@ final class FloorPlanScene: SKScene {
     }
 }
 
+// MARK: - 藍圖格線、面積坪數計算與外圍工程尺寸線
+extension FloorPlanScene {
+    private func drawBlueprintGrid() {
+        gridNode?.removeFromParent()
+        let container = SKNode()
+        container.zPosition = DrawParameters.gridZPosition
+        
+        let extent: CGFloat = 4000
+        let minorStep: CGFloat = 100 // 50 cm
+        let majorStep: CGFloat = 200 // 100 cm (1 m)
+        
+        let minorPath = CGMutablePath()
+        let majorPath = CGMutablePath()
+        
+        var coord = -extent
+        while coord <= extent {
+            let isMajor = Int(abs(coord)) % Int(majorStep) == 0
+            let target = isMajor ? majorPath : minorPath
+            target.move(to: CGPoint(x: coord, y: -extent))
+            target.addLine(to: CGPoint(x: coord, y: extent))
+            target.move(to: CGPoint(x: -extent, y: coord))
+            target.addLine(to: CGPoint(x: extent, y: coord))
+            coord += minorStep
+        }
+        
+        let minorShape = SKShapeNode(path: minorPath)
+        minorShape.strokeColor = AppTheme.gridMinor
+        minorShape.lineWidth = 1.0
+        
+        let majorShape = SKShapeNode(path: majorPath)
+        majorShape.strokeColor = AppTheme.gridMajor
+        majorShape.lineWidth = 1.8
+        
+        container.addChild(minorShape)
+        container.addChild(majorShape)
+        addChild(container)
+        gridNode = container
+    }
+    
+    func recalculateAreaAndExteriorDimensions() {
+        let wallNodes = children.compactMap { $0 as? FloorPlanSurface }.filter { $0.capturedSurface.category == .wall }
+        guard !wallNodes.isEmpty else { return }
+        
+        var rawPoints: [CGPoint] = []
+        for wall in wallNodes {
+            let cosA = cos(wall.zRotation)
+            let sinA = sin(wall.zRotation)
+            let p1 = CGPoint(x: wall.position.x - wall.halfLength * cosA, y: wall.position.y - wall.halfLength * sinA)
+            let p2 = CGPoint(x: wall.position.x + wall.halfLength * cosA, y: wall.position.y + wall.halfLength * sinA)
+            rawPoints.append(p1)
+            rawPoints.append(p2)
+        }
+        
+        var vertices: [CGPoint] = []
+        for pt in rawPoints {
+            if !vertices.contains(where: { hypot($0.x - pt.x, $0.y - pt.y) < 30.0 }) {
+                vertices.append(pt)
+            }
+        }
+        
+        let cx = vertices.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(max(vertices.count, 1))
+        let cy = vertices.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(max(vertices.count, 1))
+        
+        let sortedVertices = vertices.sorted {
+            atan2($0.y - cy, $0.x - cx) < atan2($1.y - cy, $1.x - cx)
+        }
+        
+        var areaPt2: Double = 0.0
+        if sortedVertices.count >= 3 {
+            for i in 0..<sortedVertices.count {
+                let j = (i + 1) % sortedVertices.count
+                areaPt2 += Double(sortedVertices[i].x * sortedVertices[j].y - sortedVertices[j].x * sortedVertices[i].y)
+            }
+            areaPt2 = abs(areaPt2) * 0.5
+        }
+        
+        let scaleSq = Double(DrawParameters.scalingFactor * DrawParameters.scalingFactor)
+        let sqm = areaPt2 / scaleSq
+        let ping = sqm * 0.3025
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.roomAreaSqm = sqm
+            self?.viewModel.roomAreaPing = ping
+        }
+        
+        drawExteriorDimensionLines(points: rawPoints)
+    }
+    
+    private func drawExteriorDimensionLines(points: [CGPoint]) {
+        exteriorDimensionsNode?.removeFromParent()
+        guard !points.isEmpty else { return }
+        
+        let minX = points.map(\.x).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0
+        let minY = points.map(\.y).min() ?? 0
+        let maxY = points.map(\.y).max() ?? 0
+        
+        let widthPt = maxX - minX
+        let heightPt = maxY - minY
+        guard widthPt > 20 && heightPt > 20 else { return }
+        
+        let container = SKNode()
+        container.zPosition = DrawParameters.dimensionZPosition
+        container.isHidden = !viewModel.showDimensions
+        
+        let ptToCm = 100.0 / Double(DrawParameters.scalingFactor)
+        let offsetOuter: CGFloat = 95.0
+        
+        addEngineeringDimLine(
+            to: container,
+            start: CGPoint(x: minX, y: maxY + offsetOuter),
+            end: CGPoint(x: maxX, y: maxY + offsetOuter),
+            extStartA: CGPoint(x: minX, y: maxY + 18),
+            extStartB: CGPoint(x: maxX, y: maxY + 18),
+            labelText: String(format: "%.0f", Double(widthPt) * ptToCm),
+            isVertical: false
+        )
+        
+        addEngineeringDimLine(
+            to: container,
+            start: CGPoint(x: minX, y: minY - offsetOuter),
+            end: CGPoint(x: maxX, y: minY - offsetOuter),
+            extStartA: CGPoint(x: minX, y: minY - 18),
+            extStartB: CGPoint(x: maxX, y: minY - 18),
+            labelText: String(format: "%.0f", Double(widthPt) * ptToCm),
+            isVertical: false
+        )
+        
+        addEngineeringDimLine(
+            to: container,
+            start: CGPoint(x: minX - offsetOuter, y: minY),
+            end: CGPoint(x: minX - offsetOuter, y: maxY),
+            extStartA: CGPoint(x: minX - 18, y: minY),
+            extStartB: CGPoint(x: minX - 18, y: maxY),
+            labelText: String(format: "%.0f", Double(heightPt) * ptToCm),
+            isVertical: true
+        )
+        
+        addEngineeringDimLine(
+            to: container,
+            start: CGPoint(x: maxX + offsetOuter, y: minY),
+            end: CGPoint(x: maxX + offsetOuter, y: maxY),
+            extStartA: CGPoint(x: maxX + 18, y: minY),
+            extStartB: CGPoint(x: maxX + 18, y: maxY),
+            labelText: String(format: "%.0f", Double(heightPt) * ptToCm),
+            isVertical: true
+        )
+        
+        addChild(container)
+        exteriorDimensionsNode = container
+    }
+    
+    private func addEngineeringDimLine(
+        to container: SKNode,
+        start: CGPoint,
+        end: CGPoint,
+        extStartA: CGPoint,
+        extStartB: CGPoint,
+        labelText: String,
+        isVertical: Bool
+    ) {
+        let extPath = CGMutablePath()
+        extPath.move(to: extStartA)
+        extPath.addLine(to: start)
+        extPath.move(to: extStartB)
+        extPath.addLine(to: end)
+        
+        let extNode = SKShapeNode(path: extPath)
+        extNode.strokeColor = AppTheme.dimensionLine.withAlphaComponent(0.45)
+        extNode.lineWidth = 1.5
+        container.addChild(extNode)
+        
+        let mainPath = CGMutablePath()
+        mainPath.move(to: start)
+        mainPath.addLine(to: end)
+        
+        let tick: CGFloat = 11.0
+        for pt in [start, end] {
+            mainPath.move(to: CGPoint(x: pt.x - tick, y: pt.y - tick))
+            mainPath.addLine(to: CGPoint(x: pt.x + tick, y: pt.y + tick))
+        }
+        
+        let mainNode = SKShapeNode(path: mainPath)
+        mainNode.strokeColor = AppTheme.dimensionLine
+        mainNode.lineWidth = 2.2
+        container.addChild(mainNode)
+        
+        let mid = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+        let labelNode = SKNode()
+        labelNode.position = mid
+        if isVertical { labelNode.zRotation = .pi / 2 }
+        
+        let label = SKLabelNode(fontNamed: "Helvetica-Bold")
+        label.text = labelText
+        label.fontSize = 24
+        label.fontColor = AppTheme.dimensionText
+        label.verticalAlignmentMode = .center
+        label.horizontalAlignmentMode = .center
+        
+        let bgRect = CGRect(
+            x: -label.frame.width / 2 - 10,
+            y: -label.frame.height / 2 - 4,
+            width: label.frame.width + 20,
+            height: label.frame.height + 8
+        )
+        let bg = SKShapeNode(rect: bgRect, cornerRadius: 4)
+        bg.fillColor = AppTheme.canvasBg
+        bg.strokeColor = .clear
+        bg.zPosition = -1
+        
+        labelNode.addChild(bg)
+        labelNode.addChild(label)
+        container.addChild(labelNode)
+    }
+}
+
+// MARK: - 圖層開關、畫面置中、旋轉 90° 與 Undo / Redo
+extension FloorPlanScene {
+    func applyDisplaySettings(showFurniture: Bool, showDimensions: Bool, showFurnitureLabels: Bool) {
+        let objectNodes = children.compactMap { $0 as? FloorPlanObject }
+        for obj in objectNodes {
+            obj.isHidden = !showFurniture
+            obj.setLabelVisible(showFurnitureLabels)
+        }
+        
+        let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
+        for surface in surfaceNodes {
+            surface.setDimensionVisible(showDimensions)
+        }
+        
+        exteriorDimensionsNode?.isHidden = !showDimensions
+    }
+    
+    func rotateView90() {
+        guard let camera = self.camera else { return }
+        let target = camera.zRotation - (.pi / 2)
+        let action = SKAction.rotate(toAngle: target, duration: 0.22, shortestUnitArc: true)
+        camera.run(action)
+    }
+    
+    func recenterCamera(animated: Bool = true) {
+        guard let camera = self.camera else { return }
+        let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
+        guard !surfaceNodes.isEmpty else { return }
+        
+        var minX = CGFloat.greatestFiniteMagnitude
+        var maxX = -CGFloat.greatestFiniteMagnitude
+        var minY = CGFloat.greatestFiniteMagnitude
+        var maxY = -CGFloat.greatestFiniteMagnitude
+        
+        for node in surfaceNodes {
+            let cosA = cos(node.zRotation)
+            let sinA = sin(node.zRotation)
+            let pts = [
+                CGPoint(x: node.position.x - node.halfLength * cosA, y: node.position.y - node.halfLength * sinA),
+                CGPoint(x: node.position.x + node.halfLength * cosA, y: node.position.y + node.halfLength * sinA)
+            ]
+            for pt in pts {
+                minX = min(minX, pt.x); maxX = max(maxX, pt.x)
+                minY = min(minY, pt.y); maxY = max(maxY, pt.y)
+            }
+        }
+        
+        let center = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
+        let span = max(maxX - minX, maxY - minY) + 460
+        let targetScale = max(0.35, min(2.6, span / 1100.0))
+        
+        if animated {
+            let move = SKAction.move(to: center, duration: 0.25)
+            let zoom = SKAction.scale(to: targetScale, duration: 0.25)
+            camera.run(SKAction.group([move, zoom]))
+        } else {
+            camera.position = center
+            camera.setScale(targetScale)
+        }
+    }
+    
+    private func captureSnapshot() -> SceneSnapshot {
+        var surfaceMap: [ObjectIdentifier: SurfaceSnapshot] = [:]
+        for node in children.compactMap({ $0 as? FloorPlanSurface }) {
+            surfaceMap[ObjectIdentifier(node)] = SurfaceSnapshot(
+                position: node.position,
+                zRotation: node.zRotation,
+                halfLength: node.halfLength,
+                openDirection: node.openDirection
+            )
+        }
+        var objectMap: [ObjectIdentifier: ObjectSnapshot] = [:]
+        for obj in children.compactMap({ $0 as? FloorPlanObject }) {
+            objectMap[ObjectIdentifier(obj)] = ObjectSnapshot(
+                position: obj.position,
+                zRotation: obj.zRotation,
+                xScale: obj.xScale,
+                yScale: obj.yScale
+            )
+        }
+        return SceneSnapshot(surfaces: surfaceMap, objects: objectMap, cameraRotation: camera?.zRotation ?? 0)
+    }
+    
+    private func pushUndoState() {
+        undoStack.append(captureSnapshot())
+        if undoStack.count > 25 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        syncUndoRedoFlags()
+    }
+    
+    private func restoreSnapshot(_ snapshot: SceneSnapshot) {
+        for node in children.compactMap({ $0 as? FloorPlanSurface }) {
+            if let state = snapshot.surfaces[ObjectIdentifier(node)] {
+                node.position = state.position
+                node.zRotation = state.zRotation
+                node.openDirection = state.openDirection
+                node.halfLength = state.halfLength
+                node.updateDimensionLabel()
+            }
+        }
+        for obj in children.compactMap({ $0 as? FloorPlanObject }) {
+            if let state = snapshot.objects[ObjectIdentifier(obj)] {
+                obj.position = state.position
+                obj.zRotation = state.zRotation
+                obj.xScale = state.xScale
+                obj.yScale = state.yScale
+                obj.updateSizeLabel()
+            }
+        }
+        camera?.zRotation = snapshot.cameraRotation
+        recalculateAreaAndExteriorDimensions()
+    }
+    
+    private func syncUndoRedoFlags() {
+        let canU = !undoStack.isEmpty
+        let canR = !redoStack.isEmpty
+        DispatchQueue.main.async { [weak self] in
+            self?.viewModel.canUndo = canU
+            self?.viewModel.canRedo = canR
+        }
+    }
+    
+    func performUndo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(captureSnapshot())
+        restoreSnapshot(previous)
+        syncUndoRedoFlags()
+        viewModel.statusToastMessage = "已復原上一步"
+    }
+    
+    func performRedo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(captureSnapshot())
+        restoreSnapshot(next)
+        syncUndoRedoFlags()
+        viewModel.statusToastMessage = "已重做操作"
+    }
+}
+
 // MARK: - 核心工程演算法：正交直角對齊 & 單邊基準尺全域縮放
 extension FloorPlanScene {
     func orthogonalizeWalls() {
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let wallNodes = surfaceNodes.filter { $0.capturedSurface.category == .wall }
         guard let primaryWall = wallNodes.max(by: { $0.halfLength < $1.halfLength }) else { return }
+        
+        pushUndoState()
         
         let baseAngle = primaryWall.zRotation
         let snapStep: CGFloat = .pi / 2
@@ -76,6 +463,7 @@ extension FloorPlanScene {
             camera.zRotation = baseAngle
         }
         
+        recalculateAreaAndExteriorDimensions()
         viewModel.statusToastMessage = "已完成 \(alignedCount) 面牆體與門窗正交直角對齊"
     }
     
@@ -84,6 +472,8 @@ extension FloorPlanScene {
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
         guard !surfaceNodes.isEmpty else { return }
+        
+        pushUndoState()
         
         let sumX = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.x }
         let sumY = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.y }
@@ -94,12 +484,10 @@ extension FloorPlanScene {
         }
         
         for obj in objectNodes {
-            let dx = obj.position.x - center.x
-            let dy = obj.position.y - center.y
-            obj.position = CGPoint(x: center.x + dx * ratio, y: center.y + dy * ratio)
-            obj.setScale(obj.xScale * ratio)
+            obj.applyGlobalScale(ratio: ratio, around: center)
         }
         
+        recalculateAreaAndExteriorDimensions()
         viewModel.statusToastMessage = String(format: "已依基準尺全域縮放校準 (比例 %.3fx)", Double(ratio))
     }
 }
@@ -156,8 +544,18 @@ private extension FloorPlanScene {
         let locationInView = sender.location(in: view)
         let locationInScene = convertPoint(fromView: locationInView)
         
-        if let selectedObject = viewModel.selectedObject, selectedObject.contains(locationInScene) {
-            if sender.state == .changed { selectedObject.position = locationInScene }
+        if let selectedObject = viewModel.selectedObject, selectedObject.contains(locationInScene) || isDraggingObject {
+            switch sender.state {
+            case .began:
+                isDraggingObject = true
+                pushUndoState()
+            case .changed:
+                selectedObject.position = locationInScene
+            case .ended, .cancelled:
+                isDraggingObject = false
+            default:
+                break
+            }
             return
         }
         
@@ -231,12 +629,14 @@ extension FloorPlanScene {
     func addNewObject(with category: CapturedRoom.Object.Category) {
         guard let camera = self.camera, let firstObject = objects.first else { return }
         let newFloorPlanObject = FloorPlanObject(capturedObject: firstObject, withCategory: category, objectPosition: camera.position)
+        newFloorPlanObject.isHidden = !viewModel.showFurniture
+        newFloorPlanObject.setLabelVisible(viewModel.showFurnitureLabels)
         addChild(newFloorPlanObject)
     }
     
     func addExampleAnnotations() {
         guard let camera = self.camera else { return }
-        let annotation = FloorPlanAnnotation(title: "區域標註", subtitle: "點擊編輯文字", fontSize: 40, fontColor: .blue)
+        let annotation = FloorPlanAnnotation(title: "區域標註", subtitle: "點擊編輯文字", fontSize: 36, fontColor: AppTheme.windowStroke)
         annotation.position = camera.position
         addChild(annotation)
     }
@@ -279,7 +679,6 @@ extension FloorPlanScene {
         }
     }
     
-    /// 產生 1:1 公分 (cm) 比例的 AutoCAD R12 DXF 檔案內容
     func generateDXF() -> String {
         let ptToCm = 100.0 / Double(DrawParameters.scalingFactor)
         
@@ -322,7 +721,6 @@ extension FloorPlanScene {
             ])
         }
         
-        // HEADER ($INSUNITS = 5 代表公分 cm)
         lines.append(contentsOf: [
             "0", "SECTION",
             "2", "HEADER",
@@ -331,13 +729,12 @@ extension FloorPlanScene {
             "0", "ENDSEC"
         ])
         
-        // TABLES (定義 5 個 CAD 標準圖層)
         let layerDefs: [(String, String)] = [
-            ("WALLS", "7"),       // 白色/黑色
-            ("DOORS", "1"),       // 紅色
-            ("WINDOWS", "5"),     // 藍色
-            ("DIMENSIONS", "3"),  // 綠色
-            ("FURNITURE", "8")    // 灰色
+            ("WALLS", "7"),
+            ("DOORS", "1"),
+            ("WINDOWS", "5"),
+            ("DIMENSIONS", "3"),
+            ("FURNITURE", "8")
         ]
         lines.append(contentsOf: ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", "\(layerDefs.count)"])
         for (name, color) in layerDefs {
@@ -345,7 +742,6 @@ extension FloorPlanScene {
         }
         lines.append(contentsOf: ["0", "ENDTAB", "0", "ENDSEC"])
         
-        // ENTITIES
         lines.append(contentsOf: ["0", "SECTION", "2", "ENTITIES"])
         
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
@@ -366,7 +762,6 @@ extension FloorPlanScene {
             case .wall:
                 addLine(layer: "WALLS", x1: ax, y1: ay, x2: bx, y2: by)
                 
-                // 牆面公分文字標註 (自動修正文字正向與法向量偏移)
                 var angleDeg = angle * 180.0 / .pi
                 angleDeg = angleDeg.truncatingRemainder(dividingBy: 360.0)
                 if angleDeg > 180 { angleDeg -= 360 }
@@ -401,13 +796,12 @@ extension FloorPlanScene {
             }
         }
         
-        // 匯出家具矩形外框
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
-        for obj in objectNodes {
+        for obj in objectNodes where !obj.isHidden {
             let cx = Double(obj.position.x) * ptToCm
             let cy = Double(obj.position.y) * ptToCm
-            let hw = Double(obj.capturedObject.dimensions.x) * 100.0 * Double(obj.xScale) / 2.0
-            let hh = Double(obj.capturedObject.dimensions.z) * 100.0 * Double(obj.yScale) / 2.0
+            let hw = Double(obj.capturedObject.dimensions.x) * 100.0 * Double(abs(obj.xScale)) / 2.0
+            let hh = Double(obj.capturedObject.dimensions.z) * 100.0 * Double(abs(obj.yScale)) / 2.0
             let angle = Double(obj.zRotation)
             let cosA = cos(angle)
             let sinA = sin(angle)

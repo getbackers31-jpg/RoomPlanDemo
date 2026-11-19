@@ -9,11 +9,13 @@ final class FloorPlanSurface: SKNode, Identifiable {
     private var borderNode: SKShapeNode?
     private var hideWallShape: SKShapeNode?
     private var arcShape: SKShapeNode?
+    private var doorSectorShape: SKShapeNode?
+    private var windowGlassShape: SKShapeNode?
     
-    // 牆面尺寸標註元件
     private var dimensionContainer: SKNode?
     private var dimensionLabel: SKLabelNode?
     private var dimensionBg: SKShapeNode?
+    private var isDimensionVisible: Bool = true
     
     var halfLength: CGFloat {
         didSet {
@@ -48,6 +50,11 @@ extension FloorPlanSurface {
     func select() { updateHighlight() }
     func deselect() { borderNode?.removeFromParent() }
     
+    func setDimensionVisible(_ visible: Bool) {
+        isDimensionVisible = visible
+        dimensionContainer?.isHidden = !visible
+    }
+    
     func updateDoorOpenDirection(to newValue: OpenDirection) {
         self.openDirection = newValue
         drawSurface()
@@ -56,21 +63,24 @@ extension FloorPlanSurface {
     func updateAngleRadians(to newAngle: CGFloat) {
         self.zRotation = newAngle * (.pi / 180)
         updateDimensionLabel()
+        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
     
     func updateAngle(to newAngle: CGFloat) {
         self.zRotation = newAngle
         updateDimensionLabel()
+        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
     
     func updateWidth(to newValue: CGFloat) {
         halfLength = newValue
         updateHighlight()
+        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
     
     func updateDepth(to newValue: CGFloat) {
         selectedShape?.lineWidth = newValue
-        hideWallShape?.lineWidth = newValue
+        hideWallShape?.lineWidth = newValue + 2
     }
     
     func updatePosition(x: Double? = nil, y: Double? = nil, z: Double? = nil) {
@@ -78,9 +88,9 @@ extension FloorPlanSurface {
         let currentZPosition = self.zPosition
         self.position = CGPoint(x: x ?? currentPosition.x, y: y ?? currentPosition.y)
         self.zPosition = z ?? currentZPosition
+        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
     
-    /// 依據全域校準比例，等比例縮放牆面長度與相對中心點的位置
     func applyGlobalScale(ratio: CGFloat, around origin: CGPoint) {
         self.halfLength *= ratio
         let dx = self.position.x - origin.x
@@ -92,27 +102,26 @@ extension FloorPlanSurface {
         updateDimensionLabel()
     }
     
-    /// 更新牆面公分尺寸文字與正向角度
     func updateDimensionLabel() {
         guard capturedSurface.category == .wall else { return }
         
         let lengthCm = Double(halfLength * 2 / DrawParameters.scalingFactor) * 100.0
-        let text = String(format: "%.1f cm", lengthCm)
+        let text = String(format: "%.0f cm", lengthCm)
         
         if dimensionLabel == nil {
             let container = SKNode()
-            container.zPosition = 35
+            container.zPosition = DrawParameters.dimensionZPosition
             
             let label = SKLabelNode(fontNamed: "Helvetica-Bold")
-            label.fontSize = 24
-            label.fontColor = .darkGray
+            label.fontSize = 20
+            label.fontColor = AppTheme.dimensionText
             label.verticalAlignmentMode = .center
             label.horizontalAlignmentMode = .center
             
             let bg = SKShapeNode()
-            bg.fillColor = UIColor.white.withAlphaComponent(0.88)
-            bg.strokeColor = UIColor.lightGray.withAlphaComponent(0.6)
-            bg.lineWidth = 1.5
+            bg.fillColor = UIColor.white.withAlphaComponent(0.92)
+            bg.strokeColor = AppTheme.dimensionLine.withAlphaComponent(0.35)
+            bg.lineWidth = 1.2
             bg.zPosition = -1
             
             container.addChild(bg)
@@ -125,20 +134,20 @@ extension FloorPlanSurface {
         }
         
         dimensionLabel?.text = text
+        dimensionContainer?.isHidden = !isDimensionVisible
         
         if let label = dimensionLabel, let bg = dimensionBg {
-            let padX: CGFloat = 10
-            let padY: CGFloat = 6
+            let padX: CGFloat = 8
+            let padY: CGFloat = 4
             let rect = CGRect(
                 x: -label.frame.width / 2 - padX,
                 y: -label.frame.height / 2 - padY,
                 width: label.frame.width + padX * 2,
                 height: label.frame.height + padY * 2
             )
-            bg.path = CGPath(roundedRect: rect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+            bg.path = CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
         }
         
-        // 避免文字倒置：牆面角度超過 ±90° 時自動翻轉標籤
         var angleDeg = Double(zRotation) * 180.0 / .pi
         angleDeg = angleDeg.truncatingRemainder(dividingBy: 360.0)
         if angleDeg > 180 { angleDeg -= 360 }
@@ -146,10 +155,10 @@ extension FloorPlanSurface {
         
         if angleDeg > 90 || angleDeg < -90 {
             dimensionContainer?.zRotation = .pi
-            dimensionContainer?.position = CGPoint(x: 0, y: -34)
+            dimensionContainer?.position = CGPoint(x: 0, y: -28)
         } else {
             dimensionContainer?.zRotation = 0
-            dimensionContainer?.position = CGPoint(x: 0, y: 34)
+            dimensionContainer?.position = CGPoint(x: 0, y: 28)
         }
     }
 }
@@ -157,13 +166,17 @@ extension FloorPlanSurface {
 private extension FloorPlanSurface {
     func drawSurface() {
         switch capturedSurface.category {
-        case .door: drawDoor()
+        case .door:
+            drawDoor()
         case .wall:
             drawWall()
             updateDimensionLabel()
-        case .window: drawWindow()
-        case .floor, .opening: break
-        @unknown default: break
+        case .window:
+            drawWindow()
+        case .floor, .opening:
+            break
+        @unknown default:
+            break
         }
     }
     
@@ -172,7 +185,11 @@ private extension FloorPlanSurface {
         if let existingWall = selectedShape {
             existingWall.path = wallPath
         } else {
-            let newWallShape = SKShapeNode.create(from: wallPath, strokeColor: .black, lineWidth: wallWidth)
+            let newWallShape = SKShapeNode.create(
+                from: wallPath,
+                strokeColor: AppTheme.wallStroke,
+                lineWidth: wallWidth
+            )
             newWallShape.lineCap = .square
             selectedShape = newWallShape
             addChild(newWallShape)
@@ -183,79 +200,148 @@ private extension FloorPlanSurface {
         let doorPath = CGMutablePath.create(from: pointA, to: pointC)
         let hideWallPath = CGMutablePath.create(from: pointA, to: pointB)
         let doorArcPath = createArcPath()
-        
-        if let doorShape = selectedShape {
-            doorShape.path = doorPath
-        } else {
-            let doorShape = SKShapeNode.create(from: doorPath, zPosition: DrawParameters.doorZPosition)
-            doorShape.lineCap = .square
-            selectedShape = doorShape
-            addChild(doorShape)
-        }
+        let sectorPath = createDoorSectorPath()
         
         if let hideWallShape = hideWallShape {
             hideWallShape.path = hideWallPath
         } else {
-            let hideWallShape = SKShapeNode.create(from: hideWallPath, strokeColor: DrawParameters.floorPlanSurfaceColor, lineWidth: DrawParameters.hideSurfaceWidth, zPosition: DrawParameters.hideSurfaceZPosition)
-            self.hideWallShape = hideWallShape
-            addChild(hideWallShape)
+            let node = SKShapeNode.create(
+                from: hideWallPath,
+                strokeColor: AppTheme.canvasBg,
+                lineWidth: DrawParameters.hideSurfaceWidth,
+                zPosition: DrawParameters.hideSurfaceZPosition
+            )
+            self.hideWallShape = node
+            addChild(node)
+        }
+        
+        if let sector = doorSectorShape {
+            sector.path = sectorPath
+        } else {
+            let node = SKShapeNode(path: sectorPath)
+            node.fillColor = AppTheme.doorFill
+            node.strokeColor = .clear
+            node.zPosition = DrawParameters.doorZPosition - 1
+            self.doorSectorShape = node
+            addChild(node)
+        }
+        
+        if let doorShape = selectedShape {
+            doorShape.path = doorPath
+        } else {
+            let node = SKShapeNode.create(
+                from: doorPath,
+                strokeColor: AppTheme.doorStroke,
+                lineWidth: 8.0,
+                zPosition: DrawParameters.doorZPosition
+            )
+            node.lineCap = .square
+            selectedShape = node
+            addChild(node)
         }
         
         if let doorArcShape = arcShape {
             doorArcShape.path = doorArcPath
         } else {
-            let doorArcShape = SKShapeNode.create(from: doorArcPath, lineWidth: DrawParameters.doorArcWidth, zPosition: DrawParameters.doorArcZPosition)
-            self.arcShape = doorArcShape
-            addChild(doorArcShape)
+            let node = SKShapeNode.create(
+                from: doorArcPath,
+                strokeColor: AppTheme.doorStroke,
+                lineWidth: DrawParameters.doorArcWidth,
+                zPosition: DrawParameters.doorArcZPosition
+            )
+            self.arcShape = node
+            addChild(node)
         }
     }
     
     func drawWindow() {
-        let windowPath = CGMutablePath.create(from: pointA, to: pointC)
         let hideWallPath = CGMutablePath.create(from: pointA, to: pointB)
-        let windowArcPath = createArcPath()
+        let framePath = CGMutablePath.create(from: pointA, to: pointB)
         
-        if let windowShape = selectedShape {
-            windowShape.path = windowPath
-        } else {
-            let windowShape = SKShapeNode.create(from: windowPath, zPosition: DrawParameters.windowZPosition)
-            windowShape.lineCap = .square
-            selectedShape = windowShape
-            addChild(windowShape)
-        }
+        let glassPath = CGMutablePath()
+        let offset: CGFloat = 5.0
+        glassPath.move(to: CGPoint(x: -halfLength, y: offset))
+        glassPath.addLine(to: CGPoint(x: halfLength, y: offset))
+        glassPath.move(to: CGPoint(x: -halfLength, y: -offset))
+        glassPath.addLine(to: CGPoint(x: halfLength, y: -offset))
         
         if let hideWallShape = hideWallShape {
             hideWallShape.path = hideWallPath
         } else {
-            let hideWallShape = SKShapeNode.create(from: hideWallPath, strokeColor: DrawParameters.floorPlanSurfaceColor, lineWidth: DrawParameters.hideSurfaceWidth, zPosition: DrawParameters.hideSurfaceZPosition)
-            self.hideWallShape = hideWallShape
-            addChild(hideWallShape)
+            let node = SKShapeNode.create(
+                from: hideWallPath,
+                strokeColor: AppTheme.canvasBg,
+                lineWidth: DrawParameters.hideSurfaceWidth,
+                zPosition: DrawParameters.hideSurfaceZPosition
+            )
+            self.hideWallShape = node
+            addChild(node)
         }
         
-        if let windowArcShape = arcShape {
-            windowArcShape.path = windowArcPath
+        if let windowShape = selectedShape {
+            windowShape.path = framePath
         } else {
-            let windowArcShape = SKShapeNode.create(from: windowArcPath, lineWidth: DrawParameters.doorArcWidth, zPosition: DrawParameters.windowZPosition)
-            self.arcShape = windowArcShape
-            addChild(windowArcShape)
+            let node = SKShapeNode.create(
+                from: framePath,
+                strokeColor: AppTheme.windowStroke.withAlphaComponent(0.35),
+                lineWidth: DrawParameters.windowWidth,
+                zPosition: DrawParameters.windowZPosition
+            )
+            node.lineCap = .butt
+            selectedShape = node
+            addChild(node)
+        }
+        
+        if let glass = windowGlassShape {
+            glass.path = glassPath
+        } else {
+            let node = SKShapeNode.create(
+                from: glassPath,
+                strokeColor: AppTheme.windowStroke,
+                lineWidth: 3.5,
+                zPosition: DrawParameters.windowZPosition + 1
+            )
+            self.windowGlassShape = node
+            addChild(node)
         }
     }
     
     func createArcPath() -> CGPath {
         let doorArcPath = CGMutablePath()
-        doorArcPath.addArc(center: pointA, radius: halfLength * 2, startAngle: openDirection.arcStartAngle, endAngle: openDirection.arcEndAngle, clockwise: true)
-        let dashPattern: [CGFloat] = [24.0, 8.0]
-        return doorArcPath.copy(dashingWithPhase: 1, lengths: dashPattern)
+        doorArcPath.addArc(
+            center: pointA,
+            radius: halfLength * 2,
+            startAngle: openDirection.arcStartAngle,
+            endAngle: openDirection.arcEndAngle,
+            clockwise: true
+        )
+        let dashPattern: [CGFloat] = [14.0, 8.0]
+        return doorArcPath.copy(dashingWithPhase: 0, lengths: dashPattern)
+    }
+    
+    func createDoorSectorPath() -> CGPath {
+        let path = CGMutablePath()
+        path.move(to: pointA)
+        path.addLine(to: pointB)
+        path.addArc(
+            center: pointA,
+            radius: halfLength * 2,
+            startAngle: openDirection.arcStartAngle,
+            endAngle: openDirection.arcEndAngle,
+            clockwise: true
+        )
+        path.closeSubpath()
+        return path
     }
     
     func updateHighlight() {
         let highlightRect = calculateBoundingRect()
         borderNode?.removeFromParent()
         borderNode = SKShapeNode(rect: highlightRect)
-        borderNode?.strokeColor = .blue.withAlphaComponent(0.2)
-        borderNode?.lineWidth = DrawParameters.surfaceWidth + 2
-        borderNode?.zPosition = DrawParameters.surfaceWidth + 1
-        borderNode?.glowWidth = DrawParameters.surfaceWidth + 2
+        borderNode?.strokeColor = AppTheme.windowStroke.withAlphaComponent(0.35)
+        borderNode?.lineWidth = DrawParameters.wallWidth + 4
+        borderNode?.zPosition = DrawParameters.wallWidth + 2
+        borderNode?.glowWidth = 6
         if let borderNode = borderNode { addChild(borderNode) }
     }
     

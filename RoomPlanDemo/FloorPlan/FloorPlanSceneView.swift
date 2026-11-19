@@ -22,6 +22,12 @@ struct FloorPlanSceneView: UIViewRepresentable {
     func updateUIView(_ uiView: SKView, context: Context) {
         guard let scene = uiView.scene as? FloorPlanScene else { return }
         
+        scene.applyDisplaySettings(
+            showFurniture: viewModel.showFurniture,
+            showDimensions: viewModel.showDimensions,
+            showFurnitureLabels: viewModel.showFurnitureLabels
+        )
+        
         if let selectedFurniture = viewModel.furnitureToAdd {
             DispatchQueue.main.async {
                 scene.addNewObject(with: selectedFurniture)
@@ -54,6 +60,34 @@ struct FloorPlanSceneView: UIViewRepresentable {
             DispatchQueue.main.async {
                 scene.calibrateWholeRoom(by: ratio)
                 viewModel.calibrationScaleRatio = nil
+            }
+        }
+        
+        if viewModel.shouldRotate90 {
+            DispatchQueue.main.async {
+                scene.rotateView90()
+                viewModel.shouldRotate90 = false
+            }
+        }
+        
+        if viewModel.shouldRecenter {
+            DispatchQueue.main.async {
+                scene.recenterCamera(animated: true)
+                viewModel.shouldRecenter = false
+            }
+        }
+        
+        if viewModel.shouldUndo {
+            DispatchQueue.main.async {
+                scene.performUndo()
+                viewModel.shouldUndo = false
+            }
+        }
+        
+        if viewModel.shouldRedo {
+            DispatchQueue.main.async {
+                scene.performRedo()
+                viewModel.shouldRedo = false
             }
         }
     }

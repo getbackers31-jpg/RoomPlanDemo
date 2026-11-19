@@ -50,15 +50,14 @@ final class FloorPlanScene: SKScene {
 
 // MARK: - 核心工程演算法：正交直角對齊 & 單邊基準尺全域縮放
 extension FloorPlanScene {
-    /// 一鍵將所有偏差在 20 度以內的牆面與門窗對齊至主軸正交直角 (0° / 90° / 180° / 270°)
     func orthogonalizeWalls() {
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let wallNodes = surfaceNodes.filter { $0.capturedSurface.category == .wall }
         guard let primaryWall = wallNodes.max(by: { $0.halfLength < $1.halfLength }) else { return }
         
         let baseAngle = primaryWall.zRotation
-        let snapStep: CGFloat = .pi / 2 // 90度
-        let maxDeviation: CGFloat = 20.0 * (.pi / 180.0) // 容許20度內自動拉直，保留刻意設計的斜牆
+        let snapStep: CGFloat = .pi / 2
+        let maxDeviation: CGFloat = 20.0 * (.pi / 180.0)
         var alignedCount = 0
         
         for node in surfaceNodes {
@@ -68,11 +67,11 @@ extension FloorPlanScene {
             
             if abs(residual) <= maxDeviation {
                 node.zRotation = baseAngle + nearestQuarter
+                node.updateDimensionLabel()
                 alignedCount += 1
             }
         }
         
-        // 同步將整張平面圖旋轉至水平/垂直正放視角
         if let camera = self.camera {
             camera.zRotation = baseAngle
         }
@@ -80,14 +79,12 @@ extension FloorPlanScene {
         viewModel.statusToastMessage = "已完成 \(alignedCount) 面牆體與門窗正交直角對齊"
     }
     
-    /// 依據單面基準牆的實測比例，等比例校準整張空間平面圖
     func calibrateWholeRoom(by ratio: CGFloat) {
         guard ratio > 0.1 && ratio < 10.0 else { return }
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
         guard !surfaceNodes.isEmpty else { return }
         
-        // 計算所有牆面幾何中心作為縮放基準原點
         let sumX = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.x }
         let sumY = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.y }
         let center = CGPoint(x: sumX / CGFloat(surfaceNodes.count), y: sumY / CGFloat(surfaceNodes.count))
@@ -103,7 +100,7 @@ extension FloorPlanScene {
             obj.setScale(obj.xScale * ratio)
         }
         
-        viewModel.statusToastMessage = String(format: "已依基準尺全域縮放校準 (比例 %.3fx)", ratio)
+        viewModel.statusToastMessage = String(format: "已依基準尺全域縮放校準 (比例 %.3fx)", Double(ratio))
     }
 }
 
@@ -229,6 +226,7 @@ private extension FloorPlanScene {
     }
 }
 
+// MARK: - 匯出圖檔 & AutoCAD DXF 產生器
 extension FloorPlanScene {
     func addNewObject(with category: CapturedRoom.Object.Category) {
         guard let camera = self.camera, let firstObject = objects.first else { return }
@@ -244,6 +242,19 @@ extension FloorPlanScene {
     }
     
     func exportImage(with format: ImageFormat) {
+        if format == .dxf {
+            let dxfString = generateDXF()
+            guard let data = dxfString.data(using: .utf8) else { return }
+            let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("floorPlan.dxf")
+            do {
+                try data.write(to: fileURL)
+                presentShareSheet(with: fileURL)
+            } catch {
+                print("Error saving DXF: \(error.localizedDescription)")
+            }
+            return
+        }
+        
         guard let snapshot = snapshot() else { return }
         var imageData: Data?
         switch format {
@@ -255,6 +266,8 @@ extension FloorPlanScene {
                 context.beginPage()
                 snapshot.draw(in: CGRect(origin: .zero, size: snapshot.size))
             }
+        case .dxf:
+            return
         }
         guard let data = imageData else { return }
         let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("floorPlan.\(format.rawValue)")
@@ -264,6 +277,154 @@ extension FloorPlanScene {
         } catch {
             print("Error saving image: \(error.localizedDescription)")
         }
+    }
+    
+    /// 產生 1:1 公分 (cm) 比例的 AutoCAD R12 DXF 檔案內容
+    func generateDXF() -> String {
+        let ptToCm = 100.0 / Double(DrawParameters.scalingFactor)
+        
+        func fmt(_ v: Double) -> String { String(format: "%.2f", v) }
+        func normalizeDeg(_ deg: Double) -> Double {
+            var d = deg.truncatingRemainder(dividingBy: 360.0)
+            if d < 0 { d += 360.0 }
+            return d
+        }
+        
+        var lines: [String] = []
+        func addLine(layer: String, x1: Double, y1: Double, x2: Double, y2: Double) {
+            lines.append(contentsOf: [
+                "0", "LINE",
+                "8", layer,
+                "10", fmt(x1), "20", fmt(y1), "30", "0.0",
+                "11", fmt(x2), "21", fmt(y2), "31", "0.0"
+            ])
+        }
+        
+        func addArc(layer: String, cx: Double, cy: Double, radius: Double, startDeg: Double, endDeg: Double) {
+            lines.append(contentsOf: [
+                "0", "ARC",
+                "8", layer,
+                "10", fmt(cx), "20", fmt(cy), "30", "0.0",
+                "40", fmt(radius),
+                "50", fmt(startDeg),
+                "51", fmt(endDeg)
+            ])
+        }
+        
+        func addText(layer: String, x: Double, y: Double, height: Double, angleDeg: Double, text: String) {
+            lines.append(contentsOf: [
+                "0", "TEXT",
+                "8", layer,
+                "10", fmt(x), "20", fmt(y), "30", "0.0",
+                "40", fmt(height),
+                "50", fmt(angleDeg),
+                "1", text
+            ])
+        }
+        
+        // HEADER ($INSUNITS = 5 代表公分 cm)
+        lines.append(contentsOf: [
+            "0", "SECTION",
+            "2", "HEADER",
+            "9", "$INSUNITS",
+            "70", "5",
+            "0", "ENDSEC"
+        ])
+        
+        // TABLES (定義 5 個 CAD 標準圖層)
+        let layerDefs: [(String, String)] = [
+            ("WALLS", "7"),       // 白色/黑色
+            ("DOORS", "1"),       // 紅色
+            ("WINDOWS", "5"),     // 藍色
+            ("DIMENSIONS", "3"),  // 綠色
+            ("FURNITURE", "8")    // 灰色
+        ]
+        lines.append(contentsOf: ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", "\(layerDefs.count)"])
+        for (name, color) in layerDefs {
+            lines.append(contentsOf: ["0", "LAYER", "2", name, "70", "0", "62", color, "6", "CONTINUOUS"])
+        }
+        lines.append(contentsOf: ["0", "ENDTAB", "0", "ENDSEC"])
+        
+        // ENTITIES
+        lines.append(contentsOf: ["0", "SECTION", "2", "ENTITIES"])
+        
+        let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
+        for surface in surfaceNodes {
+            let cx = Double(surface.position.x) * ptToCm
+            let cy = Double(surface.position.y) * ptToCm
+            let halfLen = Double(surface.halfLength) * ptToCm
+            let angle = Double(surface.zRotation)
+            let cosA = cos(angle)
+            let sinA = sin(angle)
+            
+            let ax = cx - halfLen * cosA
+            let ay = cy - halfLen * sinA
+            let bx = cx + halfLen * cosA
+            let by = cy + halfLen * sinA
+            
+            switch surface.capturedSurface.category {
+            case .wall:
+                addLine(layer: "WALLS", x1: ax, y1: ay, x2: bx, y2: by)
+                
+                // 牆面公分文字標註 (自動修正文字正向與法向量偏移)
+                var angleDeg = angle * 180.0 / .pi
+                angleDeg = angleDeg.truncatingRemainder(dividingBy: 360.0)
+                if angleDeg > 180 { angleDeg -= 360 }
+                if angleDeg < -180 { angleDeg += 360 }
+                var textAngle = angleDeg
+                var offsetDist = 18.0
+                if textAngle > 90 { textAngle -= 180; offsetDist = -18.0 }
+                if textAngle < -90 { textAngle += 180; offsetDist = -18.0 }
+                
+                let tx = cx - sinA * offsetDist
+                let ty = cy + cosA * offsetDist
+                let lengthText = String(format: "%.1f cm", halfLen * 2.0)
+                addText(layer: "DIMENSIONS", x: tx, y: ty, height: 12.0, angleDeg: normalizeDeg(textAngle), text: lengthText)
+                
+            case .door:
+                let lengthCm = halfLen * 2.0
+                let openAngle = Double(surface.openDirection.angle)
+                let doorEndX = ax + lengthCm * cos(angle + openAngle)
+                let doorEndY = ay + lengthCm * sin(angle + openAngle)
+                addLine(layer: "DOORS", x1: ax, y1: ay, x2: doorEndX, y2: doorEndY)
+                
+                let zRotDeg = angle * 180.0 / .pi
+                let startDeg = surface.openDirection == .clockwise ? normalizeDeg(zRotDeg - 45.0) : normalizeDeg(zRotDeg)
+                let endDeg = surface.openDirection == .clockwise ? normalizeDeg(zRotDeg) : normalizeDeg(zRotDeg + 45.0)
+                addArc(layer: "DOORS", cx: ax, cy: ay, radius: lengthCm, startDeg: startDeg, endDeg: endDeg)
+                
+            case .window:
+                addLine(layer: "WINDOWS", x1: ax, y1: ay, x2: bx, y2: by)
+                
+            default:
+                break
+            }
+        }
+        
+        // 匯出家具矩形外框
+        let objectNodes = children.compactMap { $0 as? FloorPlanObject }
+        for obj in objectNodes {
+            let cx = Double(obj.position.x) * ptToCm
+            let cy = Double(obj.position.y) * ptToCm
+            let hw = Double(obj.capturedObject.dimensions.x) * 100.0 * Double(obj.xScale) / 2.0
+            let hh = Double(obj.capturedObject.dimensions.z) * 100.0 * Double(obj.yScale) / 2.0
+            let angle = Double(obj.zRotation)
+            let cosA = cos(angle)
+            let sinA = sin(angle)
+            
+            let localCorners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+            let worldCorners = localCorners.map { (lx, ly) in
+                (cx + lx * cosA - ly * sinA, cy + lx * sinA + ly * cosA)
+            }
+            for i in 0..<4 {
+                let p1 = worldCorners[i]
+                let p2 = worldCorners[(i + 1) % 4]
+                addLine(layer: "FURNITURE", x1: p1.0, y1: p1.1, x2: p2.0, y2: p2.1)
+            }
+        }
+        
+        lines.append(contentsOf: ["0", "ENDSEC", "0", "EOF"])
+        return lines.joined(separator: "\r\n")
     }
     
     func presentShareSheet(with fileURL: URL) {

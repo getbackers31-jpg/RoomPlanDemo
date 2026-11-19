@@ -10,6 +10,11 @@ final class FloorPlanSurface: SKNode, Identifiable {
     private var hideWallShape: SKShapeNode?
     private var arcShape: SKShapeNode?
     
+    // 牆面尺寸標註元件
+    private var dimensionContainer: SKNode?
+    private var dimensionLabel: SKLabelNode?
+    private var dimensionBg: SKShapeNode?
+    
     var halfLength: CGFloat {
         didSet {
             drawSurface()
@@ -50,10 +55,12 @@ extension FloorPlanSurface {
     
     func updateAngleRadians(to newAngle: CGFloat) {
         self.zRotation = newAngle * (.pi / 180)
+        updateDimensionLabel()
     }
     
     func updateAngle(to newAngle: CGFloat) {
         self.zRotation = newAngle
+        updateDimensionLabel()
     }
     
     func updateWidth(to newValue: CGFloat) {
@@ -82,6 +89,68 @@ extension FloorPlanSurface {
         if borderNode?.parent != nil {
             updateHighlight()
         }
+        updateDimensionLabel()
+    }
+    
+    /// 更新牆面公分尺寸文字與正向角度
+    func updateDimensionLabel() {
+        guard capturedSurface.category == .wall else { return }
+        
+        let lengthCm = Double(halfLength * 2 / DrawParameters.scalingFactor) * 100.0
+        let text = String(format: "%.1f cm", lengthCm)
+        
+        if dimensionLabel == nil {
+            let container = SKNode()
+            container.zPosition = 35
+            
+            let label = SKLabelNode(fontNamed: "Helvetica-Bold")
+            label.fontSize = 24
+            label.fontColor = .darkGray
+            label.verticalAlignmentMode = .center
+            label.horizontalAlignmentMode = .center
+            
+            let bg = SKShapeNode()
+            bg.fillColor = UIColor.white.withAlphaComponent(0.88)
+            bg.strokeColor = UIColor.lightGray.withAlphaComponent(0.6)
+            bg.lineWidth = 1.5
+            bg.zPosition = -1
+            
+            container.addChild(bg)
+            container.addChild(label)
+            addChild(container)
+            
+            self.dimensionContainer = container
+            self.dimensionLabel = label
+            self.dimensionBg = bg
+        }
+        
+        dimensionLabel?.text = text
+        
+        if let label = dimensionLabel, let bg = dimensionBg {
+            let padX: CGFloat = 10
+            let padY: CGFloat = 6
+            let rect = CGRect(
+                x: -label.frame.width / 2 - padX,
+                y: -label.frame.height / 2 - padY,
+                width: label.frame.width + padX * 2,
+                height: label.frame.height + padY * 2
+            )
+            bg.path = CGPath(roundedRect: rect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+        }
+        
+        // 避免文字倒置：牆面角度超過 ±90° 時自動翻轉標籤
+        var angleDeg = Double(zRotation) * 180.0 / .pi
+        angleDeg = angleDeg.truncatingRemainder(dividingBy: 360.0)
+        if angleDeg > 180 { angleDeg -= 360 }
+        if angleDeg < -180 { angleDeg += 360 }
+        
+        if angleDeg > 90 || angleDeg < -90 {
+            dimensionContainer?.zRotation = .pi
+            dimensionContainer?.position = CGPoint(x: 0, y: -34)
+        } else {
+            dimensionContainer?.zRotation = 0
+            dimensionContainer?.position = CGPoint(x: 0, y: 34)
+        }
     }
 }
 
@@ -89,7 +158,9 @@ private extension FloorPlanSurface {
     func drawSurface() {
         switch capturedSurface.category {
         case .door: drawDoor()
-        case .wall: drawWall()
+        case .wall:
+            drawWall()
+            updateDimensionLabel()
         case .window: drawWindow()
         case .floor, .opening: break
         @unknown default: break

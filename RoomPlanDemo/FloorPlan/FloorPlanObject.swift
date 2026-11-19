@@ -14,6 +14,16 @@ final class FloorPlanObject: SKNode {
     private var baseWidthPt: CGFloat
     private var baseHeightPt: CGFloat
     
+    var currentWidthCm: Double {
+        let ptToCm = 100.0 / Double(DrawParameters.scalingFactor)
+        return Double(baseWidthPt) * Double(abs(xScale)) * ptToCm
+    }
+    
+    var currentHeightCm: Double {
+        let ptToCm = 100.0 / Double(DrawParameters.scalingFactor)
+        return Double(baseHeightPt) * Double(abs(yScale)) * ptToCm
+    }
+    
     init(capturedObject: CapturedRoom.Object,
          withCategory type: CapturedRoom.Object.Category? = nil,
          objectPosition: CGPoint? = nil) {
@@ -68,15 +78,34 @@ extension FloorPlanObject {
     }
     
     func updateSizeLabel() {
-        let ptToCm = 100.0 / Double(DrawParameters.scalingFactor)
-        let wCm = Double(baseWidthPt) * Double(abs(xScale)) * ptToCm
-        let hCm = Double(baseHeightPt) * Double(abs(yScale)) * ptToCm
-        sizeLabel?.text = String(format: "%.0f×%.0f", wCm, hCm)
+        sizeLabel?.text = String(format: "%.0f×%.0f", currentWidthCm, currentHeightCm)
         updateLabelOrientation()
     }
 }
 
 private extension FloorPlanObject {
+    var chineseCategoryName: String {
+        switch capturedObjectCategory {
+        case .storage: return "櫃體"
+        case .refrigerator: return "冰箱"
+        case .stove: return "爐具"
+        case .bed: return "床鋪"
+        case .sink: return "洗手台"
+        case .washerDryer: return "洗烘機"
+        case .toilet: return "馬桶"
+        case .bathtub: return "浴缸"
+        case .oven: return "烤箱"
+        case .dishwasher: return "洗碗機"
+        case .table: return "桌子"
+        case .sofa: return "沙發"
+        case .chair: return "椅子"
+        case .fireplace: return "壁爐"
+        case .television: return "電視"
+        case .stairs: return "樓梯"
+        @unknown default: return "家具"
+        }
+    }
+    
     func highlight() {
         borderNode?.removeFromParent()
         let rect = CGRect(x: -baseWidthPt / 2, y: -baseHeightPt / 2, width: baseWidthPt, height: baseHeightPt)
@@ -179,7 +208,7 @@ private extension FloorPlanObject {
         let fontSize = max(13, min(20, min(baseWidthPt, baseHeightPt) * 0.18))
         
         let name = SKLabelNode(fontNamed: "Helvetica-Bold")
-        name.text = capturedObjectCategory.displayName
+        name.text = chineseCategoryName
         name.fontSize = fontSize
         name.fontColor = AppTheme.dimensionText
         name.verticalAlignmentMode = .center

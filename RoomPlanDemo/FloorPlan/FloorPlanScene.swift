@@ -1,3 +1,4 @@
+import UIKit
 import RoomPlan
 import SpriteKit
 import RealityKit
@@ -58,7 +59,7 @@ final class FloorPlanScene: SKScene {
         if let savedState = viewModel.initialEditState {
             applyEditState(savedState)
         } else if viewModel.autoOrthogonalizeOnLoad {
-            orthogonalizeWalls()
+            orthogonalizeWalls(recordUndo: false)
             DispatchQueue.main.async { [weak self] in
                 self?.viewModel.autoOrthogonalizeOnLoad = false
             }
@@ -164,7 +165,7 @@ extension FloorPlanScene {
     }
 }
 
-// MARK: - 藍圖格線、面積坪數計算與外圍工程尺寸線
+// MARK: - 藍圖格線、L型多邊形精準面積計算與外圍工程尺寸線
 extension FloorPlanScene {
     private func drawBlueprintGrid() {
         gridNode?.removeFromParent()
@@ -204,42 +205,24 @@ extension FloorPlanScene {
     }
     
     func recalculateAreaAndExteriorDimensions() {
-        let wallNodes = children.compactMap { $0 as? FloorPlanSurface }.filter { $0.capturedSurface.category == .wall }
-        guard !wallNodes.isEmpty else { return }
+        let boundaryNodes = children.compactMap { $0 as? FloorPlanSurface }.filter {
+            $0.capturedSurface.category == .wall || $0.capturedSurface.category == .opening
+        }
+        guard !boundaryNodes.isEmpty else { return }
         
+        var segments: [(CGPoint, CGPoint)] = []
         var rawPoints: [CGPoint] = []
-        for wall in wallNodes {
-            let cosA = cos(wall.zRotation)
-            let sinA = sin(wall.zRotation)
-            let p1 = CGPoint(x: wall.position.x - wall.halfLength * cosA, y: wall.position.y - wall.halfLength * sinA)
-            let p2 = CGPoint(x: wall.position.x + wall.halfLength * cosA, y: wall.position.y + wall.halfLength * sinA)
+        for node in boundaryNodes {
+            let cosA = cos(node.zRotation)
+            let sinA = sin(node.zRotation)
+            let p1 = CGPoint(x: node.position.x - node.halfLength * cosA, y: node.position.y - node.halfLength * sinA)
+            let p2 = CGPoint(x: node.position.x + node.halfLength * cosA, y: node.position.y + node.halfLength * sinA)
+            segments.append((p1, p2))
             rawPoints.append(p1)
             rawPoints.append(p2)
         }
         
-        var vertices: [CGPoint] = []
-        for pt in rawPoints {
-            if !vertices.contains(where: { hypot($0.x - pt.x, $0.y - pt.y) < 30.0 }) {
-                vertices.append(pt)
-            }
-        }
-        
-        let cx = vertices.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(max(vertices.count, 1))
-        let cy = vertices.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(max(vertices.count, 1))
-        
-        let sortedVertices = vertices.sorted {
-            atan2($0.y - cy, $0.x - cx) < atan2($1.y - cy, $1.x - cx)
-        }
-        
-        var areaPt2: Double = 0.0
-        if sortedVertices.count >= 3 {
-            for i in 0..<sortedVertices.count {
-                let j = (i + 1) % sortedVertices.count
-                areaPt2 += Double(sortedVertices[i].x * sortedVertices[j].y - sortedVertices[j].x * sortedVertices[i].y)
-            }
-            areaPt2 = abs(areaPt2) * 0.5
-        }
-        
+        let areaPt2 = computePolygonAreaPt2(from: segments)
         let scaleSq = Double(DrawParameters.scalingFactor * DrawParameters.scalingFactor)
         let sqm = areaPt2 / scaleSq
         let ping = sqm * 0.3025
@@ -250,6 +233,97 @@ extension FloorPlanScene {
         }
         
         drawExteriorDimensionLines(points: rawPoints)
+    }
+    
+    private func computePolygonAreaPt2(from segments: [(CGPoint, CGPoint)]) -> Double {
+        let tolerance: CGFloat = 40.0
+        var vertices: [CGPoint] = []
+        
+        func vertexIndex(for pt: CGPoint) -> Int {
+            for (idx, existing) in vertices.enumerated() {
+                if hypot(existing.x - pt.x, existing.y - pt.y) <= tolerance {
+                    return idx
+                }
+            }
+            vertices.append(pt)
+            return vertices.count - 1
+        }
+        
+        var adjacency: [Int: Set<Int>] = [:]
+        for (p1, p2) in segments {
+            let u = vertexIndex(for: p1)
+            let v = vertexIndex(for: p2)
+            if u == v { continue }
+            adjacency[u, default: []].insert(v)
+            adjacency[v, default: []].insert(u)
+        }
+        
+        func shoelace(_ pts: [CGPoint]) -> Double {
+            guard pts.count >= 3 else { return 0.0 }
+            var sum: Double = 0.0
+            for i in 0..<pts.count {
+                let j = (i + 1) % pts.count
+                sum += Double(pts[i].x * pts[j].y - pts[j].x * pts[i].y)
+            }
+            return abs(sum) * 0.5
+        }
+        
+        var visitedDirectedEdges: Set<Int> = []
+        func edgeKey(_ u: Int, _ v: Int) -> Int { u * 10000 + v }
+        
+        var bestCycleArea: Double = 0.0
+        for (u, neighbors) in adjacency {
+            for v in neighbors {
+                if visitedDirectedEdges.contains(edgeKey(u, v)) { continue }
+                var path: [Int] = [u]
+                var currU = u
+                var currV = v
+                var steps = 0
+                
+                while steps < 64 {
+                    visitedDirectedEdges.insert(edgeKey(currU, currV))
+                    if currV == u {
+                        if path.count >= 3 {
+                            let area = shoelace(path.map { vertices[$0] })
+                            if area > bestCycleArea { bestCycleArea = area }
+                        }
+                        break
+                    }
+                    if path.contains(currV) { break }
+                    path.append(currV)
+                    
+                    let nextCandidates = (adjacency[currV] ?? []).filter { $0 != currU }
+                    guard !nextCandidates.isEmpty else { break }
+                    
+                    let inAngle = atan2(vertices[currU].y - vertices[currV].y, vertices[currU].x - vertices[currV].x)
+                    let nextW = nextCandidates.min { a, b in
+                        let angA = atan2(vertices[a].y - vertices[currV].y, vertices[a].x - vertices[currV].x)
+                        let angB = atan2(vertices[b].y - vertices[currV].y, vertices[b].x - vertices[currV].x)
+                        var diffA = (angA - inAngle).truncatingRemainder(dividingBy: 2 * .pi)
+                        if diffA <= 1e-5 { diffA += 2 * .pi }
+                        var diffB = (angB - inAngle).truncatingRemainder(dividingBy: 2 * .pi)
+                        if diffB <= 1e-5 { diffB += 2 * .pi }
+                        return diffA < diffB
+                    }!
+                    
+                    currU = currV
+                    currV = nextW
+                    steps += 1
+                }
+            }
+        }
+        
+        if bestCycleArea > 0 {
+            return bestCycleArea
+        }
+        
+        guard vertices.count >= 3 else { return 0.0 }
+        let cx = vertices.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(vertices.count)
+        let cy = vertices.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(vertices.count)
+        let sorted = vertices.sorted {
+            atan2($0.y - cy, $0.x - cx) < atan2($1.y - cy, $1.x - cx)
+        }
+        return shoelace(sorted)
     }
     
     private func drawExteriorDimensionLines(points: [CGPoint]) {
@@ -278,7 +352,7 @@ extension FloorPlanScene {
             end: CGPoint(x: maxX, y: maxY + offsetOuter),
             extStartA: CGPoint(x: minX, y: maxY + 18),
             extStartB: CGPoint(x: maxX, y: maxY + 18),
-            labelText: String(format: "%.0f", Double(widthPt) * ptToCm),
+            labelText: String(format: "%.0f cm", Double(widthPt) * ptToCm),
             isVertical: false
         )
         
@@ -288,7 +362,7 @@ extension FloorPlanScene {
             end: CGPoint(x: maxX, y: minY - offsetOuter),
             extStartA: CGPoint(x: minX, y: minY - 18),
             extStartB: CGPoint(x: maxX, y: minY - 18),
-            labelText: String(format: "%.0f", Double(widthPt) * ptToCm),
+            labelText: String(format: "%.0f cm", Double(widthPt) * ptToCm),
             isVertical: false
         )
         
@@ -298,7 +372,7 @@ extension FloorPlanScene {
             end: CGPoint(x: minX - offsetOuter, y: maxY),
             extStartA: CGPoint(x: minX - 18, y: minY),
             extStartB: CGPoint(x: minX - 18, y: maxY),
-            labelText: String(format: "%.0f", Double(heightPt) * ptToCm),
+            labelText: String(format: "%.0f cm", Double(heightPt) * ptToCm),
             isVertical: true
         )
         
@@ -308,7 +382,7 @@ extension FloorPlanScene {
             end: CGPoint(x: maxX + offsetOuter, y: maxY),
             extStartA: CGPoint(x: maxX + 18, y: minY),
             extStartB: CGPoint(x: maxX + 18, y: maxY),
-            labelText: String(format: "%.0f", Double(heightPt) * ptToCm),
+            labelText: String(format: "%.0f cm", Double(heightPt) * ptToCm),
             isVertical: true
         )
         
@@ -380,7 +454,7 @@ extension FloorPlanScene {
     }
 }
 
-// MARK: - 圖層開關、畫面置中、旋轉 90° 與 Undo / Redo
+// MARK: - 圖層開關、畫面置中、世界座標旋轉 90° 與 Undo / Redo
 extension FloorPlanScene {
     func applyDisplaySettings(showFurniture: Bool, showDimensions: Bool, showFurnitureLabels: Bool) {
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
@@ -398,16 +472,48 @@ extension FloorPlanScene {
     }
     
     func rotateView90() {
-        guard let camera = self.camera else { return }
-        let target = camera.zRotation - (.pi / 2)
-        let action = SKAction.rotate(toAngle: target, duration: 0.22, shortestUnitArc: true)
-        camera.run(action)
+        pushUndoState()
+        rotateAllNodes(by: -.pi / 2)
+        camera?.zRotation = 0
+        recalculateAreaAndExteriorDimensions()
+        recenterCamera(animated: true)
     }
     
-    func recenterCamera(animated: Bool = true) {
-        guard let camera = self.camera else { return }
+    private func rotateAllNodes(by deltaAngle: CGFloat) {
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         guard !surfaceNodes.isEmpty else { return }
+        
+        let cx = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.x } / CGFloat(surfaceNodes.count)
+        let cy = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.y } / CGFloat(surfaceNodes.count)
+        let cosA = cos(deltaAngle)
+        let sinA = sin(deltaAngle)
+        
+        func rotatePoint(_ pt: CGPoint) -> CGPoint {
+            let dx = pt.x - cx
+            let dy = pt.y - cy
+            return CGPoint(x: cx + dx * cosA - dy * sinA, y: cy + dx * sinA + dy * cosA)
+        }
+        
+        for node in surfaceNodes {
+            node.position = rotatePoint(node.position)
+            node.zRotation += deltaAngle
+            node.updateDimensionLabel()
+        }
+        
+        for obj in children.compactMap({ $0 as? FloorPlanObject }) {
+            obj.position = rotatePoint(obj.position)
+            obj.zRotation += deltaAngle
+            obj.updateSizeLabel()
+        }
+        
+        for note in children.compactMap({ $0 as? FloorPlanAnnotation }) {
+            note.position = rotatePoint(note.position)
+        }
+    }
+    
+    private func roomBoundingRect(padding: CGFloat) -> CGRect? {
+        let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
+        guard !surfaceNodes.isEmpty else { return nil }
         
         var minX = CGFloat.greatestFiniteMagnitude
         var maxX = -CGFloat.greatestFiniteMagnitude
@@ -426,9 +532,20 @@ extension FloorPlanScene {
                 minY = min(minY, pt.y); maxY = max(maxY, pt.y)
             }
         }
+        return CGRect(
+            x: minX - padding,
+            y: minY - padding,
+            width: (maxX - minX) + padding * 2,
+            height: (maxY - minY) + padding * 2
+        )
+    }
+    
+    func recenterCamera(animated: Bool = true) {
+        guard let camera = self.camera,
+              let bounds = roomBoundingRect(padding: 230) else { return }
         
-        let center = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
-        let span = max(maxX - minX, maxY - minY) + 460
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let span = max(bounds.width, bounds.height)
         let targetScale = max(0.35, min(2.6, span / 1100.0))
         
         if animated {
@@ -519,38 +636,40 @@ extension FloorPlanScene {
     }
 }
 
-// MARK: - 核心工程演算法：正交直角對齊 & 單邊基準尺全域縮放
+// MARK: - 核心工程演算法：世界座標正交直角對齊 & 單邊基準尺全域縮放
 extension FloorPlanScene {
-    func orthogonalizeWalls() {
+    func orthogonalizeWalls(recordUndo: Bool = true) {
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let wallNodes = surfaceNodes.filter { $0.capturedSurface.category == .wall }
         guard let primaryWall = wallNodes.max(by: { $0.halfLength < $1.halfLength }) else { return }
         
-        pushUndoState()
+        if recordUndo { pushUndoState() }
         
         let baseAngle = primaryWall.zRotation
+        rotateAllNodes(by: -baseAngle)
+        camera?.zRotation = 0
+        
         let snapStep: CGFloat = .pi / 2
         let maxDeviation: CGFloat = 20.0 * (.pi / 180.0)
         var alignedCount = 0
         
         for node in surfaceNodes {
-            let diff = node.zRotation - baseAngle
-            let nearestQuarter = round(diff / snapStep) * snapStep
-            let residual = atan2(sin(diff - nearestQuarter), cos(diff - nearestQuarter))
+            let nearestQuarter = round(node.zRotation / snapStep) * snapStep
+            let residual = atan2(sin(node.zRotation - nearestQuarter), cos(node.zRotation - nearestQuarter))
             
             if abs(residual) <= maxDeviation {
-                node.zRotation = baseAngle + nearestQuarter
+                node.zRotation = nearestQuarter
                 node.updateDimensionLabel()
                 alignedCount += 1
             }
         }
         
-        if let camera = self.camera {
-            camera.zRotation = baseAngle
-        }
-        
         recalculateAreaAndExteriorDimensions()
-        viewModel.statusToastMessage = "已完成 \(alignedCount) 面牆體與門窗正交直角對齊"
+        recenterCamera(animated: recordUndo)
+        
+        if recordUndo {
+            viewModel.statusToastMessage = "已完成 \(alignedCount) 面牆體與門窗正交直角對齊"
+        }
     }
     
     func calibrateWholeRoom(by ratio: CGFloat) {
@@ -623,6 +742,19 @@ private extension FloorPlanScene {
         viewModel.selectedAnnotation?.removeHighlight()
         viewModel.selectedAnnotation = nil
     }
+    
+    func findAncestor<T: SKNode>(ofType type: T.Type, in hitNodes: [SKNode]) -> T? {
+        for node in hitNodes {
+            var current: SKNode? = node
+            while let c = current {
+                if let match = c as? T, !match.isHidden {
+                    return match
+                }
+                current = c.parent
+            }
+        }
+        return nil
+    }
 }
 
 private extension FloorPlanScene {
@@ -673,7 +805,8 @@ private extension FloorPlanScene {
     @objc func pinchGestureAction(_ sender: UIPinchGestureRecognizer) {
         guard let camera = self.camera else { return }
         if sender.state == .began { previousCameraScale = camera.xScale }
-        camera.setScale(previousCameraScale * 1 / sender.scale)
+        let clampedScale = max(0.2, min(4.0, previousCameraScale * 1 / sender.scale))
+        camera.setScale(clampedScale)
     }
     
     @objc func rotationGestureAction(_ sender: UIRotationGestureRecognizer) {
@@ -687,18 +820,17 @@ private extension FloorPlanScene {
     @objc func handleTap(_ gesture: UITapGestureRecognizer) {
         guard let view = self.view else { return }
         let locationInScene = convertPoint(fromView: gesture.location(in: view))
+        let hitNodes = nodes(at: locationInScene)
         
-        if let surfaceNode = nodes(at: locationInScene).compactMap({ $0 as? FloorPlanSurface }).first {
-            deselectObject(); deselectAnnotation(); selectSurface(surfaceNode)
-        } else { deselectSurface() }
-        
-        if let objectNode = nodes(at: locationInScene).compactMap({ $0 as? FloorPlanObject }).first {
-            deselectSurface(); deselectAnnotation(); selectObject(objectNode)
-        } else { deselectObject() }
-        
-        if let annotationNode = nodes(at: locationInScene).compactMap({ $0 as? FloorPlanAnnotation }).first {
+        if let annotationNode = findAncestor(ofType: FloorPlanAnnotation.self, in: hitNodes) {
             deselectSurface(); deselectObject(); selectAnnotation(annotationNode)
-        } else { deselectAnnotation() }
+        } else if let objectNode = findAncestor(ofType: FloorPlanObject.self, in: hitNodes) {
+            deselectSurface(); deselectAnnotation(); selectObject(objectNode)
+        } else if let surfaceNode = findAncestor(ofType: FloorPlanSurface.self, in: hitNodes) {
+            deselectObject(); deselectAnnotation(); selectSurface(surfaceNode)
+        } else {
+            deselectSurface(); deselectObject(); deselectAnnotation()
+        }
     }
 }
 
@@ -710,10 +842,13 @@ private extension FloorPlanScene {
     }
 }
 
-// MARK: - 匯出圖檔 & AutoCAD DXF 產生器
+// MARK: - 專業藍圖出圖（PNG / JPEG / PDF）與 AutoCAD DXF 產生器
 extension FloorPlanScene {
     func addNewObject(with category: CapturedRoom.Object.Category) {
-        guard let camera = self.camera, let firstObject = objects.first else { return }
+        guard let camera = self.camera, let firstObject = objects.first else {
+            viewModel.statusToastMessage = "此空間未偵測到參考家具，無法新增物件"
+            return
+        }
         let newFloorPlanObject = FloorPlanObject(capturedObject: firstObject, withCategory: category, objectPosition: camera.position)
         newFloorPlanObject.isHidden = !viewModel.showFurniture
         newFloorPlanObject.setLabelVisible(viewModel.showFurnitureLabels)
@@ -728,10 +863,17 @@ extension FloorPlanScene {
     }
     
     func exportImage(with format: ImageFormat) {
+        deselectSurface()
+        deselectObject()
+        deselectAnnotation()
+        
+        let safeName = viewModel.roomUsage.replacingOccurrences(of: "/", with: "_")
+        let baseFileName = "\(viewModel.floorLabel)_\(safeName)"
+        
         if format == .dxf {
             let dxfString = generateDXF()
             guard let data = dxfString.data(using: .utf8) else { return }
-            let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("floorPlan.dxf")
+            let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("\(baseFileName).dxf")
             do {
                 try data.write(to: fileURL)
                 presentShareSheet(with: fileURL)
@@ -741,22 +883,29 @@ extension FloorPlanScene {
             return
         }
         
-        guard let snapshot = snapshot() else { return }
+        guard let blueprintImage = renderBlueprintSheet() else {
+            viewModel.statusToastMessage = "藍圖匯出失敗，請稍後再試"
+            return
+        }
+        
         var imageData: Data?
         switch format {
-        case .png: imageData = snapshot.pngData()
-        case .jpeg: imageData = snapshot.jpegData(compressionQuality: 1.0)
+        case .png:
+            imageData = blueprintImage.pngData()
+        case .jpeg:
+            imageData = blueprintImage.jpegData(compressionQuality: 0.95)
         case .pdf:
-            let pdfRenderer = UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: snapshot.size))
+            let pdfRenderer = UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: blueprintImage.size))
             imageData = pdfRenderer.pdfData { context in
                 context.beginPage()
-                snapshot.draw(in: CGRect(origin: .zero, size: snapshot.size))
+                blueprintImage.draw(in: CGRect(origin: .zero, size: blueprintImage.size))
             }
         case .dxf:
             return
         }
+        
         guard let data = imageData else { return }
-        let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("floorPlan.\(format.rawValue)")
+        let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("\(baseFileName).\(format.rawValue)")
         do {
             try data.write(to: fileURL)
             presentShareSheet(with: fileURL)
@@ -886,8 +1035,8 @@ extension FloorPlanScene {
         for obj in objectNodes where !obj.isHidden {
             let cx = Double(obj.position.x) * ptToCm
             let cy = Double(obj.position.y) * ptToCm
-            let hw = Double(obj.capturedObject.dimensions.x) * 100.0 * Double(abs(obj.xScale)) / 2.0
-            let hh = Double(obj.capturedObject.dimensions.z) * 100.0 * Double(abs(obj.yScale)) / 2.0
+            let hw = obj.currentWidthCm / 2.0
+            let hh = obj.currentHeightCm / 2.0
             let angle = Double(obj.zRotation)
             let cosA = cos(angle)
             let sinA = sin(angle)
@@ -908,15 +1057,94 @@ extension FloorPlanScene {
     }
     
     func presentShareSheet(with fileURL: URL) {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootViewController = windowScene.windows.first?.rootViewController else { return }
-        let activityViewController = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
-        rootViewController.present(activityViewController, animated: true, completion: nil)
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }),
+              let rootVC = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController ?? windowScene.windows.first?.rootViewController else {
+            return
+        }
+        
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+        
+        let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = topVC.view
+            popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+        topVC.present(activityVC, animated: true, completion: nil)
     }
     
-    func snapshot() -> UIImage? {
+    func renderBlueprintSheet() -> UIImage? {
         guard let view = self.view,
-              let texture = view.texture(from: self, crop: CGRect(origin: .zero, size: self.size)) else { return nil }
-        return UIImage(cgImage: texture.cgImage())
+              let cropRect = roomBoundingRect(padding: 185),
+              let texture = view.texture(from: self, crop: cropRect) else {
+            return nil
+        }
+        let planImage = UIImage(cgImage: texture.cgImage())
+        
+        let canvasWidth: CGFloat = 1800
+        let headerHeight: CGFloat = 165
+        let footerHeight: CGFloat = 115
+        let margin: CGFloat = 48
+        let maxPlanWidth = canvasWidth - margin * 2
+        let maxPlanHeight: CGFloat = 1800
+        
+        let scaleFactor = min(maxPlanWidth / max(planImage.size.width, 1), maxPlanHeight / max(planImage.size.height, 1))
+        let drawPlanWidth = planImage.size.width * scaleFactor
+        let drawPlanHeight = planImage.size.height * scaleFactor
+        let totalHeight = headerHeight + drawPlanHeight + footerHeight + margin * 2
+        let canvasSize = CGSize(width: canvasWidth, height: totalHeight)
+        
+        let renderer = UIGraphicsImageRenderer(size: canvasSize)
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
+            
+            AppTheme.canvasBg.setFill()
+            cg.fill(CGRect(origin: .zero, size: canvasSize))
+            
+            let headerRect = CGRect(x: 0, y: 0, width: canvasWidth, height: headerHeight)
+            UIColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1.0).setFill()
+            cg.fill(headerRect)
+            
+            let titleText = "\(viewModel.floorLabel)  \(viewModel.roomUsage)"
+            let titleAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: 44),
+                .foregroundColor: UIColor.white
+            ]
+            (titleText as NSString).draw(at: CGPoint(x: margin, y: 34), withAttributes: titleAttrs)
+            
+            let areaText = String(format: "室內實測面積：約 %.2f 坪（%.1f ㎡）｜ 單位：公分 (cm)", viewModel.roomAreaPing, viewModel.roomAreaSqm)
+            let areaAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 28, weight: .semibold),
+                .foregroundColor: UIColor(red: 0.96, green: 0.84, blue: 0.56, alpha: 1.0)
+            ]
+            (areaText as NSString).draw(at: CGPoint(x: margin, y: 98), withAttributes: areaAttrs)
+            
+            let planX = (canvasWidth - drawPlanWidth) / 2
+            let planFrame = CGRect(x: planX, y: headerHeight + margin, width: drawPlanWidth, height: drawPlanHeight)
+            planImage.draw(in: planFrame)
+            
+            AppTheme.dimensionLine.withAlphaComponent(0.35).setStroke()
+            cg.setLineWidth(2.0)
+            cg.stroke(planFrame)
+            
+            let footerY = headerHeight + margin + drawPlanHeight + 28
+            let legendText = "圖例：■ 黑色＝結構牆   ■ 橘色＝門扇開向   ■ 藍色＝窗戶   ■ 灰線＝向量家具"
+            let legendAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 24, weight: .medium),
+                .foregroundColor: AppTheme.dimensionText
+            ]
+            (legendText as NSString).draw(at: CGPoint(x: margin, y: footerY), withAttributes: legendAttrs)
+            
+            let watermarkAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 22),
+                .foregroundColor: UIColor.gray
+            ]
+            (AppTheme.footerText as NSString).draw(at: CGPoint(x: margin, y: footerY + 42), withAttributes: watermarkAttrs)
+        }
     }
 }

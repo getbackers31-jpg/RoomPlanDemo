@@ -13,6 +13,7 @@ struct RoomCaptureScanView: View {
     @State private var draftUsage: String = ""
     @State private var draftFloor: String = "1F"
     @State private var loadedSavedRoom: CapturedRoom? = nil
+    @State private var savedRoomLoadFailed: Bool = false
     
     private let isDemo: Bool
     private let savedProject: SavedRoomProject?
@@ -56,6 +57,7 @@ struct RoomCaptureScanView: View {
                 }
             }
         }
+        .toolbar(isDisplayingBlueprint ? .hidden : .visible, for: .navigationBar)
         .onAppear {
             if let project = savedProject {
                 floorPlanViewModel.savedProjectID = project.id
@@ -64,7 +66,11 @@ struct RoomCaptureScanView: View {
                 floorPlanViewModel.roomAreaPing = project.areaPing
                 floorPlanViewModel.roomAreaSqm = project.areaSqm
                 floorPlanViewModel.initialEditState = RoomProjectStore.shared.loadEditState(for: project)
-                loadedSavedRoom = RoomProjectStore.shared.loadCapturedRoom(for: project)
+                if let room = RoomProjectStore.shared.loadCapturedRoom(for: project) {
+                    loadedSavedRoom = room
+                } else {
+                    savedRoomLoadFailed = true
+                }
             } else if !isDemo {
                 viewModel.startSession()
             }
@@ -172,7 +178,6 @@ private extension RoomCaptureScanView {
     
     var blueprintOverlay: some View {
         VStack(spacing: 8) {
-            // 1. 頂部面積坪數、用途資訊卡與一鍵存檔按鈕
             HStack(spacing: 10) {
                 Button {
                     dismiss()
@@ -244,7 +249,6 @@ private extension RoomCaptureScanView {
             .padding(.horizontal, 12)
             .padding(.top, 4)
             
-            // 2. 圖層開關與工程工具列
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     toggleChip(
@@ -288,7 +292,6 @@ private extension RoomCaptureScanView {
                 .padding(.horizontal, 12)
             }
             
-            // 3. 狀態提示橫幅
             if let toast = floorPlanViewModel.statusToastMessage {
                 Text(toast)
                     .font(.footnote)
@@ -308,7 +311,6 @@ private extension RoomCaptureScanView {
             
             Spacer()
             
-            // 4. 右側浮動復原 / 重做按鈕與底部圖例列
             if floorPlanViewModel.selectedObject == nil && floorPlanViewModel.selectedSurface == nil && floorPlanViewModel.selectedAnnotation == nil {
                 HStack {
                     Spacer()
@@ -407,6 +409,16 @@ private extension RoomCaptureScanView {
             if let room = loadedSavedRoom {
                 FloorPlanSceneView(capturedRoom: room, viewModel: floorPlanViewModel)
                     .ignoresSafeArea()
+            } else if savedRoomLoadFailed {
+                VStack(spacing: 14) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.largeTitle)
+                        .foregroundColor(.orange)
+                    Text("找不到此空間的存檔資料")
+                        .font(.headline)
+                    Button("返回首頁") { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                }
             } else {
                 VStack(spacing: 12) {
                     ProgressView()

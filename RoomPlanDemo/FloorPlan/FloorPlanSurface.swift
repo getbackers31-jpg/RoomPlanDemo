@@ -173,7 +173,7 @@ private extension FloorPlanSurface {
             updateDimensionLabel()
         case .window:
             drawWindow()
-        case .floor, .opening:
+        case .opening:
             break
         @unknown default:
             break

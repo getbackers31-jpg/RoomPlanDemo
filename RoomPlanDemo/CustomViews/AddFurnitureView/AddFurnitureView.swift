@@ -33,7 +33,7 @@ struct AddFurnitureView: View {
 private extension AddFurnitureView {
     var headerView: some View {
         HStack {
-            Text("Select furniture!")
+            Text("選擇要新增的家具")
                 .font(.title)
             
             Spacer()
@@ -92,7 +92,7 @@ private extension AddFurnitureView {
                             .frame(width: 25, height: 25)
                             .foregroundStyle(.white)
                         
-                        Text(selectedFurniture.displayName)
+                        Text("加入 \(selectedFurniture.displayName)")
                             .font(.title3)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.white)

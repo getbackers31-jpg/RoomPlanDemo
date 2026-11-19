@@ -15,15 +15,15 @@ struct WelcomeView: View {
                 .foregroundColor(.indigo)
                 .padding(.bottom, 8)
             
-            Text("RoomPlan 2D")
+            Text("空間掃描 2D")
                 .font(/*@START_MENU_TOKEN@*/.title/*@END_MENU_TOKEN@*/)
                 .fontWeight(.bold)
-            Text("Scan your room and create a 2D floor plan.")
+            Text("掃描您的空間並建立 2D 平面圖。")
             
             Spacer()
                 .frame(height: 50)
             
-            NavigationLink("Start Scanning") {
+            NavigationLink("開始掃描") {
                 RoomCaptureScanView()
             }
             .padding()
@@ -33,7 +33,7 @@ struct WelcomeView: View {
             .fontWeight(.bold)
             
             
-            NavigationLink("Try Demo") {
+            NavigationLink("範例展示") {
                 RoomCaptureScanView(isDemo: true)
             }
             .padding()

@@ -11,39 +11,39 @@ extension CapturedRoom.Object.Category {
     var displayName: String {
         switch self {
         case .storage:
-            return "Storage"
+            return "收納櫃/衣櫃"
         case .refrigerator:
-            return "Refrigerator"
+            return "冰箱"
         case .stove:
-            return "Stove"
+            return "瓦斯爐/爐具"
         case .bed:
-            return "Bed"
+            return "床鋪"
         case .sink:
-            return "Sink"
+            return "水槽/洗手台"
         case .washerDryer:
-            return "Washer/Dryer"
+            return "洗衣/烘衣機"
         case .toilet:
-            return "Toilet"
+            return "馬桶"
         case .bathtub:
-            return "Bathtub"
+            return "浴缸"
         case .oven:
-            return "Oven"
+            return "烤箱"
         case .dishwasher:
-            return "Dishwasher"
+            return "洗碗機"
         case .table:
-            return "Table"
+            return "桌子"
         case .sofa:
-            return "Sofa"
+            return "沙發"
         case .chair:
-            return "Chair"
+            return "椅子"
         case .fireplace:
-            return "Fireplace"
+            return "壁爐"
         case .television:
-            return "Television"
+            return "電視"
         case .stairs:
-            return "Stairs"
+            return "樓梯"
         @unknown default:
-            return "Unknown"
+            return "未知物件"
         }
     }
     

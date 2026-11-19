@@ -116,17 +116,17 @@ private extension SurfaceDetailsView {
     func getSurfaceName(for type: CapturedRoom.Surface.Category) -> String {
         switch type {
         case .door:
-            "The Door"
+            "門"
         case .wall:
-            "The Wall"
+            "牆面"
         case .opening:
-            "The Opening"
+            "開口/通道"
         case .window:
-            "The Window"
+            "窗戶"
         case .floor:
-            "The Floor"
+            "地板"
         @unknown default:
-            "Unknown Surface"
+            "未知結構"
         }
     }
     
@@ -321,12 +321,12 @@ private extension SurfaceDetailsView {
                 )
             case .doorDirection:
                 HStack {
-                    Text("Direction:")
+                    Text("開門方向：")
                         .font(.body)
                     
                     Spacer()
                     
-                    Picker("Direction", selection: Binding(
+                    Picker("開門方向", selection: Binding(
                         get: {
                             selectedDirection
                         },

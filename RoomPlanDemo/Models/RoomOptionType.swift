@@ -29,11 +29,11 @@ enum RoomOptionType: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .furniture:
-            "Furniture"
+            "新增家具"
         case .anotation:
-            "Text"
+            "新增文字"
         case .exportImage:
-            "Export"
+            "匯出圖檔"
         }
     }
 }

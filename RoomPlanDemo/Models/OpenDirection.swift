@@ -41,9 +41,9 @@ enum OpenDirection: CaseIterable {
     var description: String {
         switch self {
         case .clockwise:
-            "Clockwise"
+            "順時針"
         case .counterClockwise:
-            "Counter Clockwise"
+            "逆時針"
         }
     }
 }

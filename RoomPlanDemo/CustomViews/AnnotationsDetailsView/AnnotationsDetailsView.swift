@@ -39,19 +39,19 @@ struct AnnotationsDetailsView: View {
         .padding(.all, 20)
         .background(Color.teal)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .alert("Edit Annotation Title", isPresented: $isEditingTitle, actions: {
-            TextField("New Title", text: $newTitle)
-            Button("Save") {
+        .alert("編輯主標題", isPresented: $isEditingTitle, actions: {
+            TextField("輸入新標題", text: $newTitle)
+            Button("儲存") {
                 selectedAnnotation?.updateTitle(newTitle)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         })
-        .alert("Edit Annotation SubTitle", isPresented: $isEditingSubTitle, actions: {
-            TextField("New SubTitle", text: $newTitle)
-            Button("Save") {
+        .alert("編輯副標題", isPresented: $isEditingSubTitle, actions: {
+            TextField("輸入新副標題", text: $newTitle)
+            Button("儲存") {
                 selectedAnnotation?.updateSubTitle(newTitle)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         })
         .onAppear {
             if let selectedAnnotation {
@@ -71,7 +71,7 @@ private extension AnnotationsDetailsView {
         } label: {
             HStack {
                 let labelText = isEditingTitleLabel ? selectedAnnotation?.titleLabel.text : selectedAnnotation?.subtitleLabel.text
-                Text(labelText ?? "No Annotation Selected")
+                Text(labelText ?? "未選取標註文字")
                     .font(.headline)
                     .foregroundStyle(.white)
                 
@@ -145,7 +145,7 @@ private extension AnnotationsDetailsView {
     
     var updateColorView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Update Annotation Color")
+            Text("變更文字顏色")
                 .font(.headline)
                 .foregroundStyle(.white)
             

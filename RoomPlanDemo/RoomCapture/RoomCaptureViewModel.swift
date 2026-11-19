@@ -67,7 +67,7 @@ extension RoomCaptureViewModel {
     func getFinalRoom() -> CapturedRoom? {
         guard let finalRoom else {
             isShowError = true
-            errorMessage = "No room capture available."
+            errorMessage = "尚未取得空間掃描資料。"
             return nil }
         
         return finalRoom
@@ -77,7 +77,7 @@ extension RoomCaptureViewModel {
         guard let finalRoom = finalRoom else {
             // Show an error if the room has not been captured yet
             isShowError = true
-            errorMessage = "No room capture available to share."
+            errorMessage = "目前沒有可匯出的空間掃描資料。"
             return
         }
         
@@ -95,7 +95,7 @@ extension RoomCaptureViewModel {
         } catch {
             // Handle errors during export
             isShowError = true
-            errorMessage = "Failed to export the room as USDZ. Error: \(error.localizedDescription)"
+            errorMessage = "匯出 USDZ 3D 模型失敗：\(error.localizedDescription)"
             print("Error exporting CapturedRoom: \(error.localizedDescription)")
         }
     }

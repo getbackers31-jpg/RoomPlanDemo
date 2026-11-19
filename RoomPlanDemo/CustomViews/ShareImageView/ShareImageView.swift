@@ -72,7 +72,7 @@ private extension ShareImageView {
                 exportImage()
             }
         } label: {
-            Text("Export")
+            Text("匯出檔案")
                 .foregroundStyle(.black)
                 .font(.headline)
                 .padding()
@@ -84,7 +84,7 @@ private extension ShareImageView {
     
     var header: some View {
         HStack {
-            Text("Select file format!")
+            Text("選擇匯出格式")
                 .foregroundStyle(.black)
                 .font(.title)
             Spacer()

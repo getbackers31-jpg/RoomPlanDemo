@@ -20,7 +20,7 @@ enum SliderMesurementType: Equatable, Hashable {
         case .angle(let updatedValue):
             "\(Int(updatedValue.radiansToDegrees))°"
         case .width(let updatedValue), .depth(let updatedValue):
-            String(format: "%.1f meters", updatedValue / 100)
+            String(format: "%.2f 公尺", updatedValue / 100)
         case .xPosition(let updatedValue), .yPosition(let updatedValue), .zPosition(let updatedValue):
             "\(updatedValue)"
         }
@@ -29,17 +29,17 @@ enum SliderMesurementType: Equatable, Hashable {
     var title: String {
         switch self {
         case .angle:
-            "Adjust Angle:"
+            "調整角度："
         case .width:
-            "Adjust Width:"
+            "調整長度："
         case .depth:
-            "Adjust Depth:"
+            "調整厚度："
         case .xPosition:
-            "Adjust X Position:"
+            "X 軸位置："
         case .yPosition:
-            "Adjust Y Position:"
+            "Y 軸位置："
         case .zPosition:
-            "Adjust Z Position:"
+            "Z 軸位置："
         }
     }
     

@@ -110,8 +110,8 @@ struct RoomCaptureScanView: View {
             .interactiveDismissDisabled()
             .ignoresSafeArea()
         })
-        .alert("Error", isPresented: $viewModel.isShowError, actions: {
-            Button("OK", role: .cancel) {}
+        .alert("錯誤", isPresented: $viewModel.isShowError, actions: {
+            Button("確定", role: .cancel) {}
         }, message: {
             Text(viewModel.errorMessage)
         })
@@ -157,7 +157,7 @@ private extension RoomCaptureScanView {
     }
     
     var scanButtonView: some View {
-        let title = viewModel.isScanning ? "Finish Scanning" : "View 2D plan"
+        let title = viewModel.isScanning ? "結束掃描" : "檢視 2D 平面圖"
         return Button(action: {
             viewModel.handleScanButtonTap()
         }) {
@@ -176,7 +176,7 @@ private extension RoomCaptureScanView {
         Button(action: {
             viewModel.shareCapturedRoom()
         }) {
-            Text("Share Room")
+            Text("匯出 3D 模型")
                 .foregroundColor(.white)
                 .padding(2)
                 .padding(.horizontal, 5)

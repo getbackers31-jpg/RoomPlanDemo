@@ -29,13 +29,13 @@ enum DetailsType: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .measurements:
-            "Resize"
+            "調整尺寸"
         case .doorDirection:
-            "Open Direction"
+            "開門方向"
         case .delete:
-            "Delete"
+            "刪除"
         case .rotate:
-            "Rotate"
+            "旋轉"
         }
     }
     

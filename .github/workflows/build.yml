@@ -10,10 +10,10 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - name: 1. 銝?撠?蝔?蝣?
+      - name: 1. 下載專案程式碼
         uses: actions/checkout@v4
 
-      - name: 2. 蝺刻陌 iOS App嚗?蝪賜?璅∪?嚗?
+      - name: 2. 編譯 iOS App（免簽名模式）
         run: |
           xcodebuild -project RoomPlanDemo.xcodeproj \
             -scheme RoomPlanDemo \
@@ -23,17 +23,17 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            INFOPLIST_KEY_CFBundleDisplayName="蝛粹???Pro"
+            INFOPLIST_KEY_CFBundleDisplayName="空間掃描Pro"
 
-      - name: 3. ????.ipa 摰?瑼?
+      - name: 3. 打包成 .ipa 安裝檔
         run: |
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/*.app Payload/
           zip -r RoomPlanDemo.ipa Payload
 
-      - name: 4. 銝 .ipa 靘?頛?
+      - name: 4. 上傳 .ipa 供下載
         uses: actions/upload-artifact@v4
         with:
-          retention-days: 3
           name: RoomPlanDemo-IPA
           path: RoomPlanDemo.ipa
+          retention-days: 3

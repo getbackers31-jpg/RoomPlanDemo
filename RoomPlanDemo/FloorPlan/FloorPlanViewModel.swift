@@ -1,10 +1,3 @@
-//
-//  FloorPlanViewModel.swift
-//  RoomPlanPDP
-//
-//  Created by Baidetskyi Yurii on 27.01.2025.
-//
-
 import Foundation
 import RoomPlan
 
@@ -19,4 +12,9 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var shouldAddText: Bool = false
     @Published var shouldShareImage: Bool = false
     @Published var shareFormat: ImageFormat? = nil
+    
+    // 正交直角對齊與基準尺全域校準控制
+    @Published var shouldOrthogonalize: Bool = false
+    @Published var calibrationScaleRatio: CGFloat? = nil
+    @Published var statusToastMessage: String? = nil
 }

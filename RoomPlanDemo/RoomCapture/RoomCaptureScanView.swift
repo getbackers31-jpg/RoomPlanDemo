@@ -1,17 +1,9 @@
-//
-//  RoomCaptureScanView.swift
-//  RoomPlanPDP
-//
-//  Created by Baidetskyi Yurii on 08.01.2025.
-//
-
 import SwiftUI
 import SpriteKit
 import RoomPlan
 import SceneKit
 
 struct RoomCaptureScanView: View {
-    // MARK: - Properties & State
     @StateObject private var viewModel: RoomCaptureViewModel = .init()
     @StateObject private var floorPlanViewModel = FloorPlanViewModel()
     @StateObject private var mockDataManager = MockDataManager()
@@ -22,15 +14,60 @@ struct RoomCaptureScanView: View {
         self.isDemo = isDemo
     }
     
-    // MARK: - View Body
     var body: some View {
         ZStack {
             mainRoomView
             
+            // 2D 平面圖頂部「一鍵正交直角對齊」與狀態提示橫幅
+            if isDemo || viewModel.isShowingFloorPlan {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button {
+                            withAnimation {
+                                floorPlanViewModel.shouldOrthogonalize = true
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "angle")
+                                Text("一鍵直角對齊")
+                                    .fontWeight(.bold)
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.indigo)
+                            .clipShape(Capsule())
+                            .shadow(radius: 3)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    
+                    if let toast = floorPlanViewModel.statusToastMessage {
+                        Text(toast)
+                            .font(.footnote)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.black.opacity(0.78))
+                            .clipShape(Capsule())
+                            .transition(.opacity)
+                            .onAppear {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+                                    withAnimation { floorPlanViewModel.statusToastMessage = nil }
+                                }
+                            }
+                    }
+                    Spacer()
+                }
+            }
+            
             if floorPlanViewModel.selectedObject != nil {
                 VStack {
                     Spacer()
-                    
                     ObjectDetailsView(
                         object: $floorPlanViewModel.selectedObject,
                         selectedType: $floorPlanViewModel.selectedType)
@@ -39,11 +76,10 @@ struct RoomCaptureScanView: View {
                 }
             }
             
-            if viewModel.isShowingFloorPlan,
+            if (isDemo || viewModel.isShowingFloorPlan),
                floorPlanViewModel.selectedObject == nil, floorPlanViewModel.selectedSurface == nil {
                 VStack {
                     Spacer()
-                    
                     RoomOptionsView(
                         selectedOption: $floorPlanViewModel.roomOptionType,
                         shouldAddFurniture: $floorPlanViewModel.shouldAddFurniture,
@@ -57,7 +93,6 @@ struct RoomCaptureScanView: View {
             if floorPlanViewModel.selectedAnnotation != nil {
                 VStack {
                     Spacer()
-                    
                     AnnotationsDetailsView(selectedAnnotation: $floorPlanViewModel.selectedAnnotation)
                         .frame(height: 250)
                         .padding(.horizontal, 20)
@@ -65,31 +100,21 @@ struct RoomCaptureScanView: View {
             }
         }
         .onAppear {
-            // Start the scan session when the view appears
-            // MARK: Real
-            if !isDemo {
-                viewModel.startSession()
-            }
+            if !isDemo { viewModel.startSession() }
         }
-        .sheet(item: $floorPlanViewModel.selectedSurface,
-               content: { type in
+        .sheet(item: $floorPlanViewModel.selectedSurface, content: { _ in
             SurfaceDetailsView(
                 surface: $floorPlanViewModel.selectedSurface,
-                selectedType: $floorPlanViewModel.selectedType)
-            .presentationDetents([.fraction(0.3), .medium])
+                selectedType: $floorPlanViewModel.selectedType,
+                floorPlanViewModel: floorPlanViewModel)
+            .presentationDetents([.fraction(0.45), .medium])
             .interactiveDismissDisabled()
             .ignoresSafeArea()
         })
         .sheet(
             isPresented: Binding(
-                get: {
-                    floorPlanViewModel.roomOptionType == .exportImage
-                },
-                set: { newValue in
-                    if !newValue {
-                        floorPlanViewModel.roomOptionType = nil
-                    }
-                }
+                get: { floorPlanViewModel.roomOptionType == .exportImage },
+                set: { if !$0 { floorPlanViewModel.roomOptionType = nil } }
             ), content: {
                 ShareImageView(
                     shouldShareImage: $floorPlanViewModel.shouldShareImage,
@@ -104,8 +129,7 @@ struct RoomCaptureScanView: View {
             floorPlanViewModel.roomOptionType = nil
             floorPlanViewModel.furnitureToAdd = nil
         }, content: {
-            AddFurnitureView(
-                floorPlanViewModel: floorPlanViewModel)
+            AddFurnitureView(floorPlanViewModel: floorPlanViewModel)
             .presentationDetents([.fraction(0.4)])
             .interactiveDismissDisabled()
             .ignoresSafeArea()
@@ -118,49 +142,35 @@ struct RoomCaptureScanView: View {
     }
 }
 
-// MARK: Views
 private extension RoomCaptureScanView {
-    
     @ViewBuilder
     var mainRoomView: some View {
-        // MARK: Real
         if isDemo {
-            // MARK: Demo
             if let finalRoom = mockDataManager.loadCapturedRoom() {
-                FloorPlanSceneView(capturedRoom: finalRoom,
-                                   viewModel: floorPlanViewModel)
-                .ignoresSafeArea()
+                FloorPlanSceneView(capturedRoom: finalRoom, viewModel: floorPlanViewModel)
+                    .ignoresSafeArea()
             }
         } else {
             if viewModel.isShowingFloorPlan,
                let finalRoom = viewModel.getFinalRoom() {
-                FloorPlanSceneView(capturedRoom: finalRoom,
-                                   viewModel: floorPlanViewModel)
-                .ignoresSafeArea()
+                FloorPlanSceneView(capturedRoom: finalRoom, viewModel: floorPlanViewModel)
+                    .ignoresSafeArea()
             } else {
                 RoomCaptureRepresentable(roomCaptureView: viewModel.roomCaptureView)
                     .ignoresSafeArea()
                     .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            scanButtonView
-                        }
-                        
+                        ToolbarItem(placement: .topBarTrailing) { scanButtonView }
                         if !viewModel.isScanning {
-                            ToolbarItem(placement: .topBarTrailing) {
-                                shareButtonView
-                            }
+                            ToolbarItem(placement: .topBarTrailing) { shareButtonView }
                         }
                     }
-                
             }
         }
     }
     
     var scanButtonView: some View {
         let title = viewModel.isScanning ? "結束掃描" : "檢視 2D 平面圖"
-        return Button(action: {
-            viewModel.handleScanButtonTap()
-        }) {
+        return Button(action: { viewModel.handleScanButtonTap() }) {
             Text(title)
                 .foregroundColor(.white)
                 .fontWeight(.regular)
@@ -172,10 +182,7 @@ private extension RoomCaptureScanView {
     }
     
     var shareButtonView: some View {
-        // Share button
-        Button(action: {
-            viewModel.shareCapturedRoom()
-        }) {
+        Button(action: { viewModel.shareCapturedRoom() }) {
             Text("匯出 3D 模型")
                 .foregroundColor(.white)
                 .padding(2)
@@ -185,8 +192,4 @@ private extension RoomCaptureScanView {
                 .fontWeight(.regular)
         }
     }
-}
-
-#Preview {
-    RoomCaptureScanView()
 }

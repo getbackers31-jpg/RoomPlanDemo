@@ -101,7 +101,7 @@ extension FloorPlanObject {
 
 private extension FloorPlanObject {
     var chineseCategoryName: String {
-        switch capturedObjectCategory {
+        switch objectCategory {
         case .storage: return "櫃體"
         case .refrigerator: return "冰箱"
         case .stove: return "爐具"
@@ -149,7 +149,7 @@ private extension FloorPlanObject {
         container.addChild(body)
         
         let detailPath = CGMutablePath()
-        switch capturedObjectCategory {
+        switch objectCategory {
         case .bed:
             let pillowW = w * 0.36
             let pillowH = min(h * 0.22, 42)

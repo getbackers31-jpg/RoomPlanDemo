@@ -60,7 +60,8 @@ private struct FloorPlanSceneCanvas: UIViewRepresentable {
         scene.applyDisplaySettings(
             showFurniture: viewModel.showFurniture,
             showDimensions: viewModel.showDimensions,
-            showFurnitureLabels: viewModel.showFurnitureLabels
+            showFurnitureLabels: viewModel.showFurnitureLabels,
+            showStructuralMarkers: viewModel.showStructuralMarkers
         )
         
         if let selectedFurniture = viewModel.furnitureToAdd {
@@ -84,10 +85,10 @@ private struct FloorPlanSceneCanvas: UIViewRepresentable {
             }
         }
         
-        if let ratio = viewModel.calibrationScaleRatio {
+        if let request = viewModel.calibrationRequest {
             DispatchQueue.main.async {
-                scene.calibrateWholeRoom(by: ratio)
-                viewModel.calibrationScaleRatio = nil
+                scene.calibrateWholeRoom(using: request)
+                viewModel.calibrationRequest = nil
             }
         }
         

@@ -9,6 +9,9 @@ private struct SurfaceSnapshot {
     let zRotation: CGFloat
     let halfLength: CGFloat
     let openDirection: OpenDirection
+    let representation: FloorPlanSurfaceRepresentation
+    let isFloorToCeilingGlass: Bool
+    let calibrationScaleFactor: CGFloat
 }
 
 private struct ObjectSnapshot {
@@ -22,11 +25,7 @@ private struct SceneSnapshot {
     let surfaces: [ObjectIdentifier: SurfaceSnapshot]
     let objects: [ObjectIdentifier: ObjectSnapshot]
     let cameraRotation: CGFloat
-}
-
-private struct PlanLineSegment {
-    var start: CGPoint
-    var end: CGPoint
+    let calibration: SavedCalibrationState?
 }
 
 final class FloorPlanScene: SKScene {
@@ -34,8 +33,6 @@ final class FloorPlanScene: SKScene {
     private var previousCameraScale = CGFloat()
     private var previousCameraPosition = CGPoint()
     
-    private let surfaces: [CapturedRoom.Surface]
-    private let objects: [CapturedRoom.Object]
     let capturedRoom: CapturedRoom
     
     private var gridNode: SKNode?
@@ -48,8 +45,6 @@ final class FloorPlanScene: SKScene {
     
     init(capturedRoom: CapturedRoom, viewModel: FloorPlanViewModel) {
         self.capturedRoom = capturedRoom
-        self.surfaces = capturedRoom.doors + capturedRoom.openings + capturedRoom.walls + capturedRoom.windows
-        self.objects = capturedRoom.objects
         self.viewModel = viewModel
         
         super.init(size: DrawParameters.floorPlanSize)
@@ -100,7 +95,11 @@ extension FloorPlanScene {
                 x: Double(node.position.x),
                 y: Double(node.position.y),
                 zRotation: Double(node.zRotation),
-                halfLength: Double(node.halfLength)
+                halfLength: Double(node.halfLength),
+                representation: node.representation == .source ? nil : node.representation,
+                isFloorToCeilingGlass: node.isFloorToCeilingGlass ? true : nil,
+                openDirection: node.openDirection,
+                strokeWidth: node.selectedShape.map { Double($0.lineWidth) }
             )
         }
         var objectMap: [String: SavedObjectState] = [:]
@@ -163,6 +162,10 @@ extension FloorPlanScene {
                 node.position = CGPoint(x: s.x, y: s.y)
                 node.zRotation = CGFloat(s.zRotation)
                 node.halfLength = CGFloat(s.halfLength)
+                node.representation = s.representation ?? .source
+                node.isFloorToCeilingGlass = s.isFloorToCeilingGlass ?? false
+                node.restoreOpenDirection(to: s.openDirection ?? .clockwise)
+                node.restoreStrokeWidth(to: s.strokeWidth.map { CGFloat($0) })
                 node.updateDimensionLabel()
             }
         }
@@ -183,7 +186,7 @@ extension FloorPlanScene {
         if let manualObjects = state.manualObjects {
             for m in manualObjects {
                 if let cat = try? JSONDecoder().decode(CapturedRoom.Object.Category.self, from: m.categoryData) {
-                    let obj = FloorPlanObject(capturedObject: nil, withCategory: cat, objectPosition: CGPoint(x: m.x, y: m.y))
+                    let obj = FloorPlanObject(withCategory: cat, objectPosition: CGPoint(x: m.x, y: m.y))
                     obj.name = "manual_object"
                     obj.userData = NSMutableDictionary(dictionary: ["manualCategoryData": m.categoryData])
                     obj.zRotation = CGFloat(m.zRotation)
@@ -283,17 +286,34 @@ extension FloorPlanScene {
     
     func recalculateAreaAndExteriorDimensions() {
         let wallNodes = children.compactMap { $0 as? FloorPlanSurface }.filter {
-            $0.capturedSurface.category == .wall
+            $0.isWallGeometry
         }
-        let connectedWalls = connectWallCorners(mergeCollinearSegments(makeSegments(from: wallNodes)))
+        let connectedWalls = FloorPlanGeometry.joinedWallSegments(
+            from: FloorPlanGeometry.segments(from: wallNodes)
+        )
         updateWallJoinOverlay(with: connectedWalls)
 
         let boundaryNodes = children.compactMap { $0 as? FloorPlanSurface }.filter {
-            $0.capturedSurface.category == .wall || $0.capturedSurface.category == .opening
+            $0.isRoomBoundaryGeometry
         }
-        guard !boundaryNodes.isEmpty else { return }
+        guard !boundaryNodes.isEmpty else {
+            viewModel.roomAreaSqm = 0
+            viewModel.roomAreaPing = 0
+            exteriorDimensionsNode?.removeFromParent()
+            exteriorDimensionsNode = nil
+            return
+        }
         
-        let boundarySegments = connectWallCorners(mergeCollinearSegments(makeSegments(from: boundaryNodes)))
+        let boundarySegments = FloorPlanGeometry.joinedWallSegments(
+            from: FloorPlanGeometry.segments(from: boundaryNodes)
+        )
+        guard !boundarySegments.isEmpty else {
+            viewModel.roomAreaSqm = 0
+            viewModel.roomAreaPing = 0
+            exteriorDimensionsNode?.removeFromParent()
+            exteriorDimensionsNode = nil
+            return
+        }
         let segments = boundarySegments.map { ($0.start, $0.end) }
         let rawPoints = boundarySegments.flatMap { [$0.start, $0.end] }
         
@@ -312,186 +332,7 @@ extension FloorPlanScene {
         }
     }
 
-    private func makeSegments(from nodes: [FloorPlanSurface]) -> [PlanLineSegment] {
-        nodes.map { node in
-            let direction = CGPoint(x: cos(node.zRotation), y: sin(node.zRotation))
-            return PlanLineSegment(
-                start: CGPoint(
-                    x: node.position.x - node.halfLength * direction.x,
-                    y: node.position.y - node.halfLength * direction.y
-                ),
-                end: CGPoint(
-                    x: node.position.x + node.halfLength * direction.x,
-                    y: node.position.y + node.halfLength * direction.y
-                )
-            )
-        }
-    }
-
-    private func mergeCollinearSegments(_ source: [PlanLineSegment]) -> [PlanLineSegment] {
-        var segments = source.filter {
-            hypot($0.end.x - $0.start.x, $0.end.y - $0.start.y) > 1
-        }
-        let parallelTolerance = sin(CGFloat.pi / 90)
-        let offsetTolerance = DrawParameters.wallWidth * 0.5
-        let gapTolerance = DrawParameters.wallWidth * 1.5
-
-        var didMerge = true
-        while didMerge {
-            didMerge = false
-            guard segments.count > 1 else { break }
-
-            mergeSearch: for firstIndex in 0..<(segments.count - 1) {
-                for secondIndex in (firstIndex + 1)..<segments.count {
-                    let first = segments[firstIndex]
-                    let second = segments[secondIndex]
-                    let firstVector = CGPoint(x: first.end.x - first.start.x, y: first.end.y - first.start.y)
-                    let secondVector = CGPoint(x: second.end.x - second.start.x, y: second.end.y - second.start.y)
-                    let firstLength = hypot(firstVector.x, firstVector.y)
-                    let secondLength = hypot(secondVector.x, secondVector.y)
-                    guard firstLength > 1, secondLength > 1 else { continue }
-
-                    let firstDirection = CGPoint(x: firstVector.x / firstLength, y: firstVector.y / firstLength)
-                    let secondDirection = CGPoint(x: secondVector.x / secondLength, y: secondVector.y / secondLength)
-                    guard abs(crossProduct(firstDirection, secondDirection)) <= parallelTolerance else { continue }
-
-                    let directionSign: CGFloat = dotProduct(firstDirection, secondDirection) < 0 ? -1 : 1
-                    let combinedVector = CGPoint(
-                        x: firstVector.x + secondVector.x * directionSign,
-                        y: firstVector.y + secondVector.y * directionSign
-                    )
-                    let combinedLength = hypot(combinedVector.x, combinedVector.y)
-                    guard combinedLength > 1 else { continue }
-                    let mergeDirection = CGPoint(
-                        x: combinedVector.x / combinedLength,
-                        y: combinedVector.y / combinedLength
-                    )
-                    let normal = CGPoint(x: -mergeDirection.y, y: mergeDirection.x)
-                    let firstStart = dotProduct(first.start, mergeDirection)
-                    let firstEnd = dotProduct(first.end, mergeDirection)
-                    let secondStart = dotProduct(second.start, mergeDirection)
-                    let secondEnd = dotProduct(second.end, mergeDirection)
-                    let firstMin = min(firstStart, firstEnd)
-                    let firstMax = max(firstStart, firstEnd)
-                    let secondMin = min(secondStart, secondEnd)
-                    let secondMax = max(secondStart, secondEnd)
-                    let gap = max(0, max(firstMin, secondMin) - min(firstMax, secondMax))
-                    guard gap <= gapTolerance else { continue }
-
-                    let overlapStart = max(firstMin, secondMin)
-                    let overlapEnd = min(firstMax, secondMax)
-                    let comparisonProjection = overlapStart <= overlapEnd
-                        ? (overlapStart + overlapEnd) / 2
-                        : (max(firstMin, secondMin) + min(firstMax, secondMax)) / 2
-                    let firstStartOffset = dotProduct(first.start, normal)
-                    let firstEndOffset = dotProduct(first.end, normal)
-                    let secondStartOffset = dotProduct(second.start, normal)
-                    let secondEndOffset = dotProduct(second.end, normal)
-                    let firstOffsetAtComparison = firstStartOffset
-                        + (comparisonProjection - firstStart) * (firstEndOffset - firstStartOffset) / (firstEnd - firstStart)
-                    let secondOffsetAtComparison = secondStartOffset
-                        + (comparisonProjection - secondStart) * (secondEndOffset - secondStartOffset) / (secondEnd - secondStart)
-                    guard abs(firstOffsetAtComparison - secondOffsetAtComparison) <= offsetTolerance else { continue }
-
-                    let minProjection = min(firstMin, secondMin)
-                    let maxProjection = max(firstMax, secondMax)
-                    let firstMidOffset = (firstStartOffset + firstEndOffset) / 2
-                    let secondMidOffset = (secondStartOffset + secondEndOffset) / 2
-                    let averageOffset = (
-                        firstMidOffset * firstLength + secondMidOffset * secondLength
-                    ) / (firstLength + secondLength)
-                    segments[firstIndex] = PlanLineSegment(
-                        start: CGPoint(
-                            x: mergeDirection.x * minProjection + normal.x * averageOffset,
-                            y: mergeDirection.y * minProjection + normal.y * averageOffset
-                        ),
-                        end: CGPoint(
-                            x: mergeDirection.x * maxProjection + normal.x * averageOffset,
-                            y: mergeDirection.y * maxProjection + normal.y * averageOffset
-                        )
-                    )
-                    segments.remove(at: secondIndex)
-                    didMerge = true
-                    break mergeSearch
-                }
-            }
-        }
-
-        return segments
-    }
-
-    private func connectWallCorners(_ source: [PlanLineSegment]) -> [PlanLineSegment] {
-        guard source.count > 1 else { return source }
-
-        var connected = source
-        let minimumCrossProduct = sin(CGFloat.pi / 90)
-        let endpointTolerance = DrawParameters.wallWidth * 2
-        let maximumMiterExtension = DrawParameters.wallWidth * 3
-
-        func endpoint(_ isStart: Bool, of segment: PlanLineSegment) -> CGPoint {
-            isStart ? segment.start : segment.end
-        }
-
-        for firstIndex in 0..<(source.count - 1) {
-            for secondIndex in (firstIndex + 1)..<source.count {
-                let first = source[firstIndex]
-                let second = source[secondIndex]
-                let firstVector = CGPoint(x: first.end.x - first.start.x, y: first.end.y - first.start.y)
-                let secondVector = CGPoint(x: second.end.x - second.start.x, y: second.end.y - second.start.y)
-                let firstLength = hypot(firstVector.x, firstVector.y)
-                let secondLength = hypot(secondVector.x, secondVector.y)
-                guard firstLength > 1, secondLength > 1 else { continue }
-
-                let firstDirection = CGPoint(x: firstVector.x / firstLength, y: firstVector.y / firstLength)
-                let secondDirection = CGPoint(x: secondVector.x / secondLength, y: secondVector.y / secondLength)
-                let determinant = crossProduct(firstDirection, secondDirection)
-                guard abs(determinant) > minimumCrossProduct else { continue }
-
-                var bestMatch: (point: CGPoint, firstIsStart: Bool, secondIsStart: Bool, score: CGFloat)?
-                for firstIsStart in [true, false] {
-                    let firstPoint = endpoint(firstIsStart, of: first)
-                    for secondIsStart in [true, false] {
-                        let secondPoint = endpoint(secondIsStart, of: second)
-                        let endpointDistance = hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y)
-                        guard endpointDistance <= endpointTolerance else { continue }
-
-                        let between = CGPoint(x: secondPoint.x - firstPoint.x, y: secondPoint.y - firstPoint.y)
-                        let distanceAlongFirst = crossProduct(between, secondDirection) / determinant
-                        let intersection = CGPoint(
-                            x: firstPoint.x + firstDirection.x * distanceAlongFirst,
-                            y: firstPoint.y + firstDirection.y * distanceAlongFirst
-                        )
-                        let firstExtension = hypot(intersection.x - firstPoint.x, intersection.y - firstPoint.y)
-                        let secondExtension = hypot(intersection.x - secondPoint.x, intersection.y - secondPoint.y)
-                        guard firstExtension <= maximumMiterExtension,
-                              secondExtension <= maximumMiterExtension else { continue }
-
-                        let score = endpointDistance + firstExtension + secondExtension
-                        if let currentMatch = bestMatch, currentMatch.score <= score {
-                            continue
-                        }
-                        bestMatch = (intersection, firstIsStart, secondIsStart, score)
-                    }
-                }
-
-                guard let match = bestMatch else { continue }
-                if match.firstIsStart {
-                    connected[firstIndex].start = match.point
-                } else {
-                    connected[firstIndex].end = match.point
-                }
-                if match.secondIsStart {
-                    connected[secondIndex].start = match.point
-                } else {
-                    connected[secondIndex].end = match.point
-                }
-            }
-        }
-
-        return connected
-    }
-
-    private func updateWallJoinOverlay(with segments: [PlanLineSegment]) {
+    private func updateWallJoinOverlay(with segments: [FloorPlanWallSegment]) {
         wallJointNode?.removeFromParent()
         guard !segments.isEmpty else {
             wallJointNode = nil
@@ -511,14 +352,6 @@ extension FloorPlanScene {
         node.zPosition = -0.5
         addChild(node)
         wallJointNode = node
-    }
-
-    private func dotProduct(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
-        lhs.x * rhs.x + lhs.y * rhs.y
-    }
-
-    private func crossProduct(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
-        lhs.x * rhs.y - lhs.y * rhs.x
     }
 
     private func computePolygonAreaPt2(from segments: [(CGPoint, CGPoint)]) -> Double {
@@ -746,7 +579,12 @@ extension FloorPlanScene {
 
 // MARK: - 圖層開關、畫面置中、世界座標旋轉 90° 與 Undo / Redo
 extension FloorPlanScene {
-    func applyDisplaySettings(showFurniture: Bool, showDimensions: Bool, showFurnitureLabels: Bool) {
+    func applyDisplaySettings(
+        showFurniture: Bool,
+        showDimensions: Bool,
+        showFurnitureLabels: Bool,
+        showStructuralMarkers: Bool
+    ) {
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
         for obj in objectNodes {
             obj.isHidden = !showFurniture
@@ -756,6 +594,11 @@ extension FloorPlanScene {
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         for surface in surfaceNodes {
             surface.setDimensionVisible(showDimensions)
+            if surface.effectiveRepresentation == .beam || surface.effectiveRepresentation == .column {
+                surface.isHidden = !showStructuralMarkers
+            } else {
+                surface.isHidden = surface.isNoiseFragment
+            }
         }
         
         exteriorDimensionsNode?.isHidden = !showDimensions
@@ -856,7 +699,10 @@ extension FloorPlanScene {
                 position: node.position,
                 zRotation: node.zRotation,
                 halfLength: node.halfLength,
-                openDirection: node.openDirection
+                openDirection: node.openDirection,
+                representation: node.representation,
+                isFloorToCeilingGlass: node.isFloorToCeilingGlass,
+                calibrationScaleFactor: node.calibrationScaleFactor
             )
         }
         var objectMap: [ObjectIdentifier: ObjectSnapshot] = [:]
@@ -868,10 +714,15 @@ extension FloorPlanScene {
                 yScale: obj.yScale
             )
         }
-        return SceneSnapshot(surfaces: surfaceMap, objects: objectMap, cameraRotation: camera?.zRotation ?? 0)
+        return SceneSnapshot(
+            surfaces: surfaceMap,
+            objects: objectMap,
+            cameraRotation: camera?.zRotation ?? 0,
+            calibration: viewModel.calibrationState
+        )
     }
     
-    private func pushUndoState() {
+    func pushUndoState() {
         undoStack.append(captureSnapshot())
         if undoStack.count > 25 { undoStack.removeFirst() }
         redoStack.removeAll()
@@ -885,6 +736,9 @@ extension FloorPlanScene {
                 node.zRotation = state.zRotation
                 node.openDirection = state.openDirection
                 node.halfLength = state.halfLength
+                node.representation = state.representation
+                node.isFloorToCeilingGlass = state.isFloorToCeilingGlass
+                node.restoreCalibrationScaleFactor(to: state.calibrationScaleFactor)
                 node.updateDimensionLabel()
             }
         }
@@ -898,6 +752,13 @@ extension FloorPlanScene {
             }
         }
         camera?.zRotation = snapshot.cameraRotation
+        viewModel.calibrationState = snapshot.calibration
+        applyDisplaySettings(
+            showFurniture: viewModel.showFurniture,
+            showDimensions: viewModel.showDimensions,
+            showFurnitureLabels: viewModel.showFurnitureLabels,
+            showStructuralMarkers: viewModel.showStructuralMarkers
+        )
         recalculateAreaAndExteriorDimensions()
     }
     
@@ -931,19 +792,22 @@ extension FloorPlanScene {
 
 // MARK: - 牆面接縫與全域校準
 extension FloorPlanScene {
-    func calibrateWholeRoom(by ratio: CGFloat) {
+    func recordUndoState() {
+        pushUndoState()
+    }
+
+    func calibrateWholeRoom(using request: FloorPlanCalibrationRequest) {
         if viewModel.isWallLocked {
             viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再執行全域校準"
             return
         }
+        let ratio = request.ratio
         guard ratio > 0.1 && ratio < 10.0 else { return }
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
         guard !surfaceNodes.isEmpty else { return }
         
         pushUndoState()
-        viewModel.markDirty(reason: "calibrate_whole_room")
-        
         let sumX = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.x }
         let sumY = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.y }
         let center = CGPoint(x: sumX / CGFloat(surfaceNodes.count), y: sumY / CGFloat(surfaceNodes.count))
@@ -955,22 +819,59 @@ extension FloorPlanScene {
         for obj in objectNodes {
             obj.applyGlobalScale(ratio: ratio, around: center)
         }
+
+        viewModel.calibrationState = SavedCalibrationState(
+            scaleFactor: (viewModel.calibrationState?.scaleFactor ?? 1) * Double(ratio),
+            referenceOriginalMeters: request.referenceOriginalMeters,
+            referenceMeasuredMeters: request.referenceMeasuredMeters,
+            calibratedAt: EditStateDateFormatter.nowString()
+        )
+        viewModel.markDirty(reason: "calibrate_whole_room")
         
         recalculateAreaAndExteriorDimensions()
         viewModel.statusToastMessage = String(format: "已依基準尺全域縮放校準 (比例 %.3fx)", Double(ratio))
+    }
+
+    func deleteSurface(_ surface: FloorPlanSurface) {
+        guard surface.parent != nil else { return }
+        surface.deselect()
+        viewModel.selectedSurface = nil
+        if surface.capturedSurface.category == .door {
+            surface.setRepresentation(.solidWall)
+            viewModel.markDirty(reason: "delete_door_replace_wall")
+        } else {
+            surface.removeFromParent()
+            viewModel.markDirty(reason: "delete_surface")
+        }
+        recalculateAreaAndExteriorDimensions()
     }
 }
 
 private extension FloorPlanScene {
     func drawSurfaces() {
-        for surface in surfaces {
-            addChild(FloorPlanSurface(capturedSurface: surface))
+        let geometry = FloorPlanGeometry(
+            capturedRoom: capturedRoom,
+            editState: viewModel.initialEditState,
+            scaleFactor: viewModel.calibrationState.map { CGFloat($0.scaleFactor) }
+        )
+        for surfaceGeometry in geometry.surfaces {
+            let node = FloorPlanSurface(
+                capturedSurface: surfaceGeometry.source,
+                geometry: surfaceGeometry
+            )
+            node.isHidden = surfaceGeometry.isNoiseFragment
+            addChild(node)
         }
     }
     
     func drawObjects() {
-        for object in objects {
-            addChild(FloorPlanObject(capturedObject: object))
+        let geometry = FloorPlanGeometry(
+            capturedRoom: capturedRoom,
+            editState: viewModel.initialEditState,
+            scaleFactor: viewModel.calibrationState.map { CGFloat($0.scaleFactor) }
+        )
+        for objectGeometry in geometry.objects {
+            addChild(FloorPlanObject(geometry: objectGeometry))
         }
     }
     
@@ -1121,7 +1022,7 @@ extension FloorPlanScene {
     
     func addNewObject(with category: CapturedRoom.Object.Category) {
         let placement = preferredManualPlacementPoint()
-        let newFloorPlanObject = FloorPlanObject(capturedObject: nil, withCategory: category, objectPosition: placement)
+        let newFloorPlanObject = FloorPlanObject(withCategory: category, objectPosition: placement)
         newFloorPlanObject.name = "manual_object"
         if let data = try? JSONEncoder().encode(category) {
             newFloorPlanObject.userData = NSMutableDictionary(dictionary: ["manualCategoryData": data])
@@ -1233,6 +1134,32 @@ extension FloorPlanScene {
                 "1", text
             ])
         }
+
+        func addWallLineAndDimension(cx: Double, cy: Double, halfLength: Double, angle: Double) {
+            let cosA = cos(angle)
+            let sinA = sin(angle)
+            let ax = cx - halfLength * cosA
+            let ay = cy - halfLength * sinA
+            let bx = cx + halfLength * cosA
+            let by = cy + halfLength * sinA
+            addLine(layer: "WALLS", x1: ax, y1: ay, x2: bx, y2: by)
+
+            var angleDeg = (angle * 180.0 / .pi).truncatingRemainder(dividingBy: 360.0)
+            if angleDeg > 180 { angleDeg -= 360 }
+            if angleDeg < -180 { angleDeg += 360 }
+            var textAngle = angleDeg
+            var offsetDist = 18.0
+            if textAngle > 90 { textAngle -= 180; offsetDist = -18.0 }
+            if textAngle < -90 { textAngle += 180; offsetDist = -18.0 }
+            addText(
+                layer: "DIMENSIONS",
+                x: cx - sinA * offsetDist,
+                y: cy + cosA * offsetDist,
+                height: 12.0,
+                angleDeg: normalizeDeg(textAngle),
+                text: String(format: "%.1f cm", halfLength * 2)
+            )
+        }
         
         lines.append(contentsOf: [
             "0", "SECTION",
@@ -1246,6 +1173,8 @@ extension FloorPlanScene {
             ("WALLS", "7"),
             ("DOORS", "1"),
             ("WINDOWS", "5"),
+            ("OPENINGS", "4"),
+            ("STRUCTURE", "30"),
             ("DIMENSIONS", "3"),
             ("FURNITURE", "8")
         ]
@@ -1258,58 +1187,68 @@ extension FloorPlanScene {
         lines.append(contentsOf: ["0", "SECTION", "2", "ENTITIES"])
         
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
-        for surface in surfaceNodes {
+        for surface in surfaceNodes where !surface.isHidden {
             let cx = Double(surface.position.x) * ptToCm
             let cy = Double(surface.position.y) * ptToCm
             let halfLen = Double(surface.halfLength) * ptToCm
             let angle = Double(surface.zRotation)
-            let cosA = cos(angle)
-            let sinA = sin(angle)
-            
-            let ax = cx - halfLen * cosA
-            let ay = cy - halfLen * sinA
-            let bx = cx + halfLen * cosA
-            let by = cy + halfLen * sinA
-            
-            switch surface.capturedSurface.category {
-            case .wall:
-                addLine(layer: "WALLS", x1: ax, y1: ay, x2: bx, y2: by)
-                
-                var angleDeg = angle * 180.0 / .pi
-                angleDeg = angleDeg.truncatingRemainder(dividingBy: 360.0)
-                if angleDeg > 180 { angleDeg -= 360 }
-                if angleDeg < -180 { angleDeg += 360 }
-                var textAngle = angleDeg
-                var offsetDist = 18.0
-                if textAngle > 90 { textAngle -= 180; offsetDist = -18.0 }
-                if textAngle < -90 { textAngle += 180; offsetDist = -18.0 }
-                
-                let tx = cx - sinA * offsetDist
-                let ty = cy + cosA * offsetDist
-                let lengthText = String(format: "%.1f cm", halfLen * 2.0)
-                addText(layer: "DIMENSIONS", x: tx, y: ty, height: 12.0, angleDeg: normalizeDeg(textAngle), text: lengthText)
-                
-            case .door:
-                let lengthCm = halfLen * 2.0
-                if lengthCm > 150.0 {
+            let ax = cx - halfLen * cos(angle)
+            let ay = cy - halfLen * sin(angle)
+            let bx = cx + halfLen * cos(angle)
+            let by = cy + halfLen * sin(angle)
+
+            switch surface.effectiveRepresentation {
+            case .solidWall:
+                addWallLineAndDimension(cx: cx, cy: cy, halfLength: halfLen, angle: angle)
+            case .wideOpening:
+                addLine(layer: "OPENINGS", x1: ax, y1: ay, x2: bx, y2: by)
+            case .beam, .column:
+                let markerHalfLength = surface.effectiveRepresentation == .column
+                    ? max(min(halfLen, 10.0), 6.0)
+                    : halfLen
+                let halfDepth = max(Double(surface.capturedSurface.dimensions.z) * 50.0, 4.0)
+                let direction = (cos(angle), sin(angle))
+                let normal = (-sin(angle), cos(angle))
+                let corners = [
+                    (cx - markerHalfLength * direction.0 - halfDepth * normal.0,
+                     cy - markerHalfLength * direction.1 - halfDepth * normal.1),
+                    (cx + markerHalfLength * direction.0 - halfDepth * normal.0,
+                     cy + markerHalfLength * direction.1 - halfDepth * normal.1),
+                    (cx + markerHalfLength * direction.0 + halfDepth * normal.0,
+                     cy + markerHalfLength * direction.1 + halfDepth * normal.1),
+                    (cx - markerHalfLength * direction.0 + halfDepth * normal.0,
+                     cy - markerHalfLength * direction.1 + halfDepth * normal.1)
+                ]
+                for index in 0..<4 {
+                    let start = corners[index]
+                    let end = corners[(index + 1) % 4]
+                    addLine(layer: "STRUCTURE", x1: start.0, y1: start.1, x2: end.0, y2: end.1)
+                }
+            case .source:
+                switch surface.capturedSurface.category {
+                case .wall:
+                    addWallLineAndDimension(cx: cx, cy: cy, halfLength: halfLen, angle: angle)
+                case .door:
+                    let openAngle = Double(surface.openDirection.angle)
+                    let doorEndX = ax + halfLen * 2 * cos(angle + openAngle)
+                    let doorEndY = ay + halfLen * 2 * sin(angle + openAngle)
+                    addLine(layer: "DOORS", x1: ax, y1: ay, x2: doorEndX, y2: doorEndY)
+
+                    let zRotDeg = angle * 180.0 / .pi
+                    let startDeg = surface.openDirection == .clockwise
+                        ? normalizeDeg(zRotDeg - 45.0)
+                        : normalizeDeg(zRotDeg)
+                    let endDeg = surface.openDirection == .clockwise
+                        ? normalizeDeg(zRotDeg)
+                        : normalizeDeg(zRotDeg + 45.0)
+                    addArc(layer: "DOORS", cx: ax, cy: ay, radius: halfLen * 2, startDeg: startDeg, endDeg: endDeg)
+                case .window:
                     addLine(layer: "WINDOWS", x1: ax, y1: ay, x2: bx, y2: by)
+                case .opening:
+                    addLine(layer: "OPENINGS", x1: ax, y1: ay, x2: bx, y2: by)
+                default:
                     break
                 }
-                let openAngle = Double(surface.openDirection.angle)
-                let doorEndX = ax + lengthCm * cos(angle + openAngle)
-                let doorEndY = ay + lengthCm * sin(angle + openAngle)
-                addLine(layer: "DOORS", x1: ax, y1: ay, x2: doorEndX, y2: doorEndY)
-                
-                let zRotDeg = angle * 180.0 / .pi
-                let startDeg = surface.openDirection == .clockwise ? normalizeDeg(zRotDeg - 45.0) : normalizeDeg(zRotDeg)
-                let endDeg = surface.openDirection == .clockwise ? normalizeDeg(zRotDeg) : normalizeDeg(zRotDeg + 45.0)
-                addArc(layer: "DOORS", cx: ax, cy: ay, radius: lengthCm, startDeg: startDeg, endDeg: endDeg)
-                
-            case .window:
-                addLine(layer: "WINDOWS", x1: ax, y1: ay, x2: bx, y2: by)
-                
-            default:
-                break
             }
         }
         

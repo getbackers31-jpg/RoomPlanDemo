@@ -8,6 +8,10 @@ struct SavedSurfaceState: Codable {
     let y: Double
     let zRotation: Double
     let halfLength: Double
+    var representation: FloorPlanSurfaceRepresentation? = nil
+    var isFloorToCeilingGlass: Bool? = nil
+    var openDirection: OpenDirection? = nil
+    var strokeWidth: Double? = nil
 }
 
 struct SavedObjectState: Codable {
@@ -69,8 +73,14 @@ struct SavedCalibrationState: Codable, Equatable {
     let calibratedAt: String
 }
 
+struct FloorPlanCalibrationRequest {
+    let ratio: CGFloat
+    let referenceOriginalMeters: Double
+    let referenceMeasuredMeters: Double
+}
+
 struct FloorPlanEditState: Codable {
-    static let currentSchemaVersion: Int = 2
+    static let currentSchemaVersion: Int = 3
     
     static var currentAppVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3.0"
@@ -431,7 +441,7 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var shareFormat: ImageFormat? = nil
     
     // 基準尺全域校準
-    @Published var calibrationScaleRatio: CGFloat? = nil
+    @Published var calibrationRequest: FloorPlanCalibrationRequest? = nil
     @Published var statusToastMessage: String? = nil
     
     // 第一階段：面積坪數、空間用途、藍圖圖層開關與修圖輔助
@@ -443,6 +453,7 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var showFurniture: Bool = true
     @Published var showDimensions: Bool = true
     @Published var showFurnitureLabels: Bool = true
+    @Published var showStructuralMarkers: Bool = true
     
     @Published var shouldRotate90: Bool = false
     @Published var shouldRecenter: Bool = false

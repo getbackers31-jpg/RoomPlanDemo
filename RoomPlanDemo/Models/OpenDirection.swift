@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum OpenDirection: CaseIterable {
+enum OpenDirection: String, CaseIterable, Codable {
     case clockwise
     case counterClockwise
     

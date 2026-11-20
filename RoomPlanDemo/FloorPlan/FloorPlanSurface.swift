@@ -1,16 +1,31 @@
 import SpriteKit
 import RoomPlan
+import UIKit
 
 final class FloorPlanSurface: SKNode, Identifiable {
     let capturedSurface: CapturedRoom.Surface
     var selectedShape: SKShapeNode?
-    var openDirection: OpenDirection = .clockwise
+    var openDirection: OpenDirection
+    var representation: FloorPlanSurfaceRepresentation {
+        didSet {
+            clearPresentationShapes()
+            drawSurface()
+            updateDimensionLabel()
+        }
+    }
+    var isFloorToCeilingGlass: Bool {
+        didSet { drawSurface() }
+    }
     
     private var borderNode: SKShapeNode?
     private var hideWallShape: SKShapeNode?
     private var arcShape: SKShapeNode?
     private var doorSectorShape: SKShapeNode?
     private var windowGlassShape: SKShapeNode?
+    private var structuralMarkerShape: SKShapeNode?
+    private(set) var calibrationScaleFactor: CGFloat
+    private let baseDepthInPoints: CGFloat
+    private var depthInPoints: CGFloat
     
     private var dimensionContainer: SKNode?
     private var dimensionLabel: SKLabelNode?
@@ -19,6 +34,12 @@ final class FloorPlanSurface: SKNode, Identifiable {
     
     var halfLength: CGFloat {
         didSet {
+            if representation == .source,
+               capturedSurface.category == .door,
+               (oldValue * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters)
+                    != (halfLength * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters) {
+                clearPresentationShapes()
+            }
             drawSurface()
         }
     }
@@ -27,18 +48,25 @@ final class FloorPlanSurface: SKNode, Identifiable {
     private var pointB: CGPoint { CGPoint(x: halfLength, y: 0) }
     private var pointC: CGPoint { pointB.rotateAround(point: pointA, by: openDirection.angle) }
     
-    init(capturedSurface: CapturedRoom.Surface) {
+    init(capturedSurface: CapturedRoom.Surface, geometry: FloorPlanSurfaceGeometry) {
         self.capturedSurface = capturedSurface
-        self.halfLength = CGFloat(capturedSurface.dimensions.x) * DrawParameters.scalingFactor / 2
+        self.openDirection = geometry.openDirection
+        self.representation = geometry.representation
+        self.isFloorToCeilingGlass = geometry.isFloorToCeilingGlass
+        self.calibrationScaleFactor = geometry.scaleFactor
+        self.baseDepthInPoints = geometry.depthInMeters / geometry.scaleFactor * geometry.pointsPerMeter
+        self.depthInPoints = geometry.depthInMeters * geometry.pointsPerMeter
+        self.halfLength = geometry.halfLength
         
         super.init()
         
-        let surfacePositionX = -CGFloat(capturedSurface.transform.position.x) * DrawParameters.scalingFactor
-        let surfacePositionY = CGFloat(capturedSurface.transform.position.z) * DrawParameters.scalingFactor
-        self.position = CGPoint(x: surfacePositionX, y: surfacePositionY)
-        self.zRotation = -CGFloat(capturedSurface.transform.eulerAngles.z - capturedSurface.transform.eulerAngles.y)
+        self.position = geometry.center
+        self.zRotation = geometry.angle
         
         drawSurface()
+        if let strokeWidth = geometry.strokeWidth {
+            updateDepth(to: strokeWidth)
+        }
     }
     
     required init?(coder aDecoder: NSCoder) {
@@ -47,6 +75,41 @@ final class FloorPlanSurface: SKNode, Identifiable {
 }
 
 extension FloorPlanSurface {
+    var effectiveRepresentation: FloorPlanSurfaceRepresentation {
+        if representation == .source,
+           capturedSurface.category == .door,
+           halfLength * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters {
+            return .wideOpening
+        }
+        return representation
+    }
+
+    var isOversizedDoor: Bool {
+        capturedSurface.category == .door &&
+            halfLength * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters
+    }
+
+    var isWallGeometry: Bool {
+        switch effectiveRepresentation {
+        case .solidWall:
+            return true
+        case .source:
+            return capturedSurface.category == .wall
+        case .wideOpening, .beam, .column:
+            return false
+        }
+    }
+
+    var isNoiseFragment: Bool {
+        isWallGeometry &&
+            halfLength * 2 / DrawParameters.scalingFactor < FloorPlanGeometry.minimumWallSegmentLengthMeters
+    }
+
+    var isRoomBoundaryGeometry: Bool {
+        isWallGeometry ||
+            (effectiveRepresentation == .source && capturedSurface.category == .opening)
+    }
+
     func select() { updateHighlight() }
     func deselect() { borderNode?.removeFromParent() }
     
@@ -58,29 +121,66 @@ extension FloorPlanSurface {
     func updateDoorOpenDirection(to newValue: OpenDirection) {
         self.openDirection = newValue
         drawSurface()
+        markDirty(reason: "door_open_direction")
+    }
+
+    func restoreOpenDirection(to value: OpenDirection) {
+        openDirection = value
+        drawSurface()
+    }
+
+    func restoreStrokeWidth(to value: CGFloat?) {
+        guard let value else { return }
+        selectedShape?.lineWidth = value
+        hideWallShape?.lineWidth = value + 2
+    }
+
+    func setRepresentation(_ newValue: FloorPlanSurfaceRepresentation) {
+        guard representation != newValue else { return }
+        (scene as? FloorPlanScene)?.recordUndoState()
+        representation = newValue
+        (scene as? FloorPlanScene)?.viewModel.markDirty(reason: "surface_representation")
+        (scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+    }
+
+    func setFloorToCeilingGlass(_ enabled: Bool) {
+        guard isFloorToCeilingGlass != enabled else { return }
+        (scene as? FloorPlanScene)?.recordUndoState()
+        isFloorToCeilingGlass = enabled
+        (scene as? FloorPlanScene)?.viewModel.markDirty(reason: "floor_to_ceiling_glass")
+    }
+
+    func restoreCalibrationScaleFactor(to value: CGFloat) {
+        calibrationScaleFactor = value
+        depthInPoints = baseDepthInPoints * value
+        drawSurface()
     }
     
     func updateAngleRadians(to newAngle: CGFloat) {
         self.zRotation = newAngle * (.pi / 180)
         updateDimensionLabel()
         (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+        markDirty(reason: "surface_angle")
     }
     
     func updateAngle(to newAngle: CGFloat) {
         self.zRotation = newAngle
         updateDimensionLabel()
         (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+        markDirty(reason: "surface_angle")
     }
     
     func updateWidth(to newValue: CGFloat) {
         halfLength = newValue
         updateHighlight()
         (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+        markDirty(reason: "surface_width")
     }
     
     func updateDepth(to newValue: CGFloat) {
         selectedShape?.lineWidth = newValue
         hideWallShape?.lineWidth = newValue + 2
+        markDirty(reason: "surface_stroke_width")
     }
     
     func updatePosition(x: Double? = nil, y: Double? = nil, z: Double? = nil) {
@@ -89,9 +189,12 @@ extension FloorPlanSurface {
         self.position = CGPoint(x: x ?? currentPosition.x, y: y ?? currentPosition.y)
         self.zPosition = z ?? currentZPosition
         (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+        markDirty(reason: "surface_position")
     }
     
     func applyGlobalScale(ratio: CGFloat, around origin: CGPoint) {
+        calibrationScaleFactor *= ratio
+        depthInPoints = baseDepthInPoints * calibrationScaleFactor
         self.halfLength *= ratio
         let dx = self.position.x - origin.x
         let dy = self.position.y - origin.y
@@ -99,11 +202,18 @@ extension FloorPlanSurface {
         if borderNode?.parent != nil {
             updateHighlight()
         }
+        drawSurface()
         updateDimensionLabel()
     }
     
     func updateDimensionLabel() {
-        guard capturedSurface.category == .wall else { return }
+        guard isWallGeometry else {
+            dimensionContainer?.removeFromParent()
+            dimensionContainer = nil
+            dimensionLabel = nil
+            dimensionBg = nil
+            return
+        }
         
         let lengthCm = Double(halfLength * 2 / DrawParameters.scalingFactor) * 100.0
         let text = String(format: "%.0f cm", lengthCm)
@@ -164,7 +274,25 @@ extension FloorPlanSurface {
 }
 
 private extension FloorPlanSurface {
+    func markDirty(reason: String) {
+        (scene as? FloorPlanScene)?.viewModel.markDirty(reason: reason)
+    }
+
     func drawSurface() {
+        switch effectiveRepresentation {
+        case .solidWall:
+            drawWall()
+            updateDimensionLabel()
+        case .wideOpening:
+            drawWideOpening()
+        case .beam, .column:
+            drawStructuralMarker()
+        case .source:
+            drawSourceSurface()
+        }
+    }
+
+    func drawSourceSurface() {
         switch capturedSurface.category {
         case .door:
             drawDoor()
@@ -178,6 +306,17 @@ private extension FloorPlanSurface {
         @unknown default:
             break
         }
+    }
+
+    func clearPresentationShapes() {
+        [selectedShape, hideWallShape, arcShape, doorSectorShape, windowGlassShape, structuralMarkerShape]
+            .forEach { $0?.removeFromParent() }
+        selectedShape = nil
+        hideWallShape = nil
+        arcShape = nil
+        doorSectorShape = nil
+        windowGlassShape = nil
+        structuralMarkerShape = nil
     }
     
     func drawWall(with wallWidth: CGFloat = DrawParameters.wallWidth) {
@@ -214,7 +353,7 @@ private extension FloorPlanSurface {
             self.hideWallShape = node
             addChild(node)
         }
-        
+
         if let sector = doorSectorShape {
             sector.path = sectorPath
         } else {
@@ -251,6 +390,58 @@ private extension FloorPlanSurface {
             )
             self.arcShape = node
             addChild(node)
+        }
+    }
+
+    func drawWideOpening() {
+        let path = CGMutablePath()
+        let openingLine = CGMutablePath.create(from: pointA, to: pointB)
+        path.addPath(openingLine.copy(dashingWithPhase: 0, lengths: [10, 7]))
+        let jambLength: CGFloat = 12
+        for point in [pointA, pointB] {
+            path.move(to: CGPoint(x: point.x, y: -jambLength / 2))
+            path.addLine(to: CGPoint(x: point.x, y: jambLength / 2))
+        }
+        if let shape = selectedShape {
+            shape.path = path
+        } else {
+            let shape = SKShapeNode.create(
+                from: path,
+                strokeColor: UIColor(red: 0.12, green: 0.55, blue: 0.48, alpha: 1),
+                lineWidth: 7,
+                zPosition: DrawParameters.doorZPosition
+            )
+            shape.lineCap = .square
+            selectedShape = shape
+            addChild(shape)
+        }
+    }
+
+    func drawStructuralMarker() {
+        let markerWidth: CGFloat
+        if effectiveRepresentation == .column {
+            markerWidth = min(max(halfLength * 2, 24), 40)
+        } else {
+            markerWidth = halfLength * 2
+        }
+        let markerDepth = max(depthInPoints, 16)
+        let rect = CGRect(
+            x: -markerWidth / 2,
+            y: -markerDepth / 2,
+            width: markerWidth,
+            height: markerDepth
+        )
+        if structuralMarkerShape == nil {
+            let shape = SKShapeNode(rect: rect)
+            let markerColor = UIColor(red: 0.47, green: 0.31, blue: 0.72, alpha: 1)
+            shape.fillColor = markerColor.withAlphaComponent(0.35)
+            shape.strokeColor = markerColor
+            shape.lineWidth = 2
+            shape.zPosition = DrawParameters.wallWidth
+            structuralMarkerShape = shape
+            addChild(shape)
+        } else {
+            structuralMarkerShape?.path = CGPath(rect: rect, transform: nil)
         }
     }
     
@@ -292,15 +483,28 @@ private extension FloorPlanSurface {
             addChild(node)
         }
         
-        if let glass = windowGlassShape {
-            glass.path = glassPath
-        } else {
-            let node = SKShapeNode.create(
-                from: glassPath,
-                strokeColor: AppTheme.windowStroke,
-                lineWidth: 3.5,
-                zPosition: DrawParameters.windowZPosition + 1
+        let isFilledGlass = isFloorToCeilingGlass
+        let displayedGlassPath: CGPath
+        if isFilledGlass {
+            displayedGlassPath = CGPath(
+                rect: CGRect(x: -halfLength, y: -8, width: halfLength * 2, height: 16),
+                transform: nil
             )
+        } else {
+            displayedGlassPath = glassPath
+        }
+
+        if let glass = windowGlassShape {
+            glass.path = displayedGlassPath
+            glass.fillColor = AppTheme.windowStroke.withAlphaComponent(0.28)
+            glass.strokeColor = AppTheme.windowStroke
+            glass.lineWidth = isFilledGlass ? 1.5 : 3.5
+        } else {
+            let node = SKShapeNode(path: displayedGlassPath)
+            node.strokeColor = AppTheme.windowStroke
+            node.lineWidth = isFilledGlass ? 1.5 : 3.5
+            node.fillColor = AppTheme.windowStroke.withAlphaComponent(0.28)
+            node.zPosition = DrawParameters.windowZPosition + 1
             self.windowGlassShape = node
             addChild(node)
         }

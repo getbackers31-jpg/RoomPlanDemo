@@ -63,7 +63,11 @@ struct SurfaceDetailsView: View {
             }
             Button("確認校準") {
                 if let ratio = pendingCalibrationRatio {
-                    applyGlobalCalibration(ratio: ratio)
+                    applyGlobalCalibration(
+                        ratio: ratio,
+                        referenceOriginalMeters: pendingCurrentCm / 100,
+                        referenceMeasuredMeters: pendingRealCm / 100
+                    )
                     calibrationMessage = String(format: "已套用全圖比例校準（%.2fx，實測 %.1f cm / 掃描 %.1f cm）。", ratio, pendingRealCm, pendingCurrentCm)
                     calibrationMessageIsError = false
                 }
@@ -156,7 +160,12 @@ private extension SurfaceDetailsView {
             case .delete:
                 Button {
                     withAnimation {
-                        surface.removeFromParent(); NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_surface")
+                        if let scene = surface.scene as? FloorPlanScene {
+                            scene.deleteSurface(surface)
+                        } else {
+                            surface.removeFromParent()
+                        }
+                        NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_surface")
                         selectedType = nil
                         surface.deselect()
                         self.surface = nil
@@ -190,6 +199,75 @@ private extension SurfaceDetailsView {
         VStack(spacing: 14) {
             switch type {
             case .measurements:
+                if let selectedSurface = surface {
+                    if selectedSurface.capturedSurface.category == .window {
+                        Toggle(
+                            "落地玻璃",
+                            isOn: Binding(
+                                get: { selectedSurface.isFloorToCeilingGlass },
+                                set: { enabled in
+                                    selectedSurface.setFloorToCeilingGlass(enabled)
+                                    NotificationCenter.default.post(
+                                        name: .floorPlanModelDidMutate,
+                                        object: "floor_to_ceiling_glass"
+                                    )
+                                }
+                            )
+                        )
+                        .tint(AppTheme.accentBlue)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                    }
+
+                    if selectedSurface.isOversizedDoor {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("寬門扇改以大開口呈現，避免過大的開啟弧線")
+                                .font(.subheadline)
+                                .foregroundStyle(.white)
+                            HStack {
+                                Button("大開口") {
+                                    selectedSurface.setRepresentation(.wideOpening)
+                                    NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "wide_opening")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.teal)
+                                Button("實體牆") {
+                                    selectedSurface.setRepresentation(.solidWall)
+                                    NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "door_to_wall")
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.white)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                    }
+
+                    if selectedSurface.capturedSurface.category == .wall {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("2D 樑柱標記")
+                                .font(.subheadline)
+                                .foregroundStyle(.white)
+                            HStack {
+                                Button("樑") {
+                                    selectedSurface.setRepresentation(.beam)
+                                    NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "mark_beam")
+                                }
+                                Button("柱") {
+                                    selectedSurface.setRepresentation(.column)
+                                    NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "mark_column")
+                                }
+                                Button("恢復牆面") {
+                                    selectedSurface.setRepresentation(.source)
+                                    NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "restore_wall")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.white)
+                        }
+                        .padding(.horizontal, 20)
+                    }
+                }
+
                 // 使用此牆作為全圖比例校準基準
                 VStack(alignment: .leading, spacing: 8) {
                     Text("使用此牆作為全圖比例校準基準")
@@ -238,12 +316,16 @@ private extension SurfaceDetailsView {
                     sliderType: .width(width),
                     newPosition: .constant(""))
                 
-                AdjustMesurementView(
-                    sliderBinding: Binding(
-                        get: { surface?.selectedShape?.lineWidth ?? 0 },
-                        set: { newValue in surface?.updateDepth(to: newValue); depth = newValue }),
-                    sliderType: .depth(depth),
-                    newPosition: .constant(""))
+                if let selectedSurface = surface,
+                   selectedSurface.effectiveRepresentation != .beam,
+                   selectedSurface.effectiveRepresentation != .column {
+                    AdjustMesurementView(
+                        sliderBinding: Binding(
+                            get: { selectedSurface.selectedShape?.lineWidth ?? 0 },
+                            set: { newValue in selectedSurface.updateDepth(to: newValue); depth = newValue }),
+                        sliderType: .depth(depth),
+                        newPosition: .constant(""))
+                }
                 
             case .doorDirection:
                 HStack {
@@ -267,6 +349,11 @@ private extension SurfaceDetailsView {
     }
 
     func handleCalibrationTap() {
+        guard !floorPlanViewModel.isWallLocked else {
+            calibrationMessage = "牆體已鎖定，請先解鎖再執行全域校準。"
+            calibrationMessageIsError = true
+            return
+        }
         guard let surface else {
             calibrationMessage = "請先選取一面牆作為校準基準。"
             calibrationMessageIsError = true
@@ -301,7 +388,11 @@ private extension SurfaceDetailsView {
         }
         let ratio = CGFloat(ratioDouble)
         if ratioDouble >= 0.95 && ratioDouble <= 1.05 {
-            applyGlobalCalibration(ratio: ratio)
+            applyGlobalCalibration(
+                ratio: ratio,
+                referenceOriginalMeters: currentCm / 100,
+                referenceMeasuredMeters: realCm / 100
+            )
             calibrationMessage = String(format: "已套用全圖比例校準（%.2fx，實測 %.1f cm / 掃描 %.1f cm）。", ratioDouble, realCm, currentCm)
             calibrationMessageIsError = false
         } else {
@@ -312,11 +403,18 @@ private extension SurfaceDetailsView {
         }
     }
 
-    func applyGlobalCalibration(ratio: CGFloat) {
-        floorPlanViewModel.calibrationScaleRatio = ratio
+    func applyGlobalCalibration(
+        ratio: CGFloat,
+        referenceOriginalMeters: Double,
+        referenceMeasuredMeters: Double
+    ) {
+        floorPlanViewModel.calibrationRequest = FloorPlanCalibrationRequest(
+            ratio: ratio,
+            referenceOriginalMeters: referenceOriginalMeters,
+            referenceMeasuredMeters: referenceMeasuredMeters
+        )
         if let surface {
             width = (surface.halfLength * 2) * ratio
         }
-        NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "global_calibration")
     }
 }

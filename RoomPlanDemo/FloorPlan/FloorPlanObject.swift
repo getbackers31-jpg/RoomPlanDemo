@@ -24,38 +24,35 @@ final class FloorPlanObject: SKNode {
         return Double(baseHeightPt) * Double(abs(yScale)) * ptToCm
     }
     
-    init(capturedObject: CapturedRoom.Object? = nil,
-         withCategory type: CapturedRoom.Object.Category? = nil,
-         objectPosition: CGPoint? = nil) {
-        self.capturedObject = capturedObject
-        self.objectCategory = type ?? capturedObject?.category ?? .storage
-        if let obj = capturedObject {
-            self.baseWidthPt = max(CGFloat(obj.dimensions.x) * DrawParameters.scalingFactor, 40)
-            self.baseHeightPt = max(CGFloat(obj.dimensions.z) * DrawParameters.scalingFactor, 40)
-        } else {
-            self.baseWidthPt = 80
-            self.baseHeightPt = 60
-        }
-        
+    init(geometry: FloorPlanObjectGeometry) {
+        self.capturedObject = geometry.source
+        self.objectCategory = geometry.source.category
+        self.baseWidthPt = geometry.baseWidthInPoints
+        self.baseHeightPt = geometry.baseDepthInPoints
+
         super.init()
-        
-        if let pos = objectPosition {
-            self.position = pos
-        } else if let obj = capturedObject {
-            let objectPositionX = -CGFloat(obj.transform.position.x) * DrawParameters.scalingFactor
-            let objectPositionY = CGFloat(obj.transform.position.z) * DrawParameters.scalingFactor
-            self.position = CGPoint(x: objectPositionX, y: objectPositionY)
-        } else {
-            self.position = .zero
-        }
-        
-        if let obj = capturedObject {
-            self.zRotation = -CGFloat(obj.transform.eulerAngles.z - obj.transform.eulerAngles.y)
-        } else {
-            self.zRotation = 0
-        }
+        self.position = geometry.center
+        self.zRotation = geometry.angle
+        self.xScale = geometry.xScale
+        self.yScale = geometry.yScale
         self.zPosition = DrawParameters.objectZPosition
-        
+
+        drawVectorFurniture()
+        setupLabels()
+        updateSizeLabel()
+    }
+
+    init(withCategory type: CapturedRoom.Object.Category, objectPosition: CGPoint = .zero) {
+        self.capturedObject = nil
+        self.objectCategory = type
+        self.baseWidthPt = 80
+        self.baseHeightPt = 60
+
+        super.init()
+        self.position = objectPosition
+        self.zRotation = 0
+        self.zPosition = DrawParameters.objectZPosition
+
         drawVectorFurniture()
         setupLabels()
         updateSizeLabel()
@@ -70,6 +67,7 @@ extension FloorPlanObject {
     func updateAngle(to newAngle: CGFloat) {
         self.zRotation = newAngle * (.pi / 180)
         updateLabelOrientation()
+        (scene as? FloorPlanScene)?.viewModel.markDirty(reason: "object_angle")
     }
     
     func select() {
@@ -89,7 +87,8 @@ extension FloorPlanObject {
         let dx = self.position.x - origin.x
         let dy = self.position.y - origin.y
         self.position = CGPoint(x: origin.x + dx * ratio, y: origin.y + dy * ratio)
-        self.setScale(self.xScale * ratio)
+        self.xScale *= ratio
+        self.yScale *= ratio
         updateSizeLabel()
     }
     

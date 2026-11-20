@@ -221,7 +221,7 @@ private extension RoomCaptureScanView {
                 Image(systemName: "viewfinder")
                     .foregroundColor(Color(red: 0.96, green: 0.84, blue: 0.56))
                 Text(viewModel.isScanning
-                     ? "緩慢平穩掃描四周牆面、門窗與家具，完成後點擊右上角結束掃描"
+                     ? "緩慢掃描牆面、門窗與家具；轉角、斜角及寬開口請放慢並多繞一圈補齊"
                      : "掃描已完成，可檢視 2D 藍圖或匯出 3D 模型")
                     .font(.caption)
                     .fontWeight(.medium)
@@ -379,6 +379,14 @@ private extension RoomCaptureScanView {
                     ) {
                         floorPlanViewModel.showDimensions.toggle()
                     }
+
+                    toggleChip(
+                        title: "樑柱標記",
+                        icon: "square.dashed",
+                        isActive: floorPlanViewModel.showStructuralMarkers
+                    ) {
+                        floorPlanViewModel.showStructuralMarkers.toggle()
+                    }
                     
                     toggleChip(
                         title: "家具標籤",
@@ -440,6 +448,7 @@ private extension RoomCaptureScanView {
                     legendItem(color: Color(uiColor: AppTheme.doorStroke), label: "門扇")
                     legendItem(color: Color(uiColor: AppTheme.windowStroke), label: "窗戶")
                     legendItem(color: Color(uiColor: AppTheme.furnitureStroke), label: "向量家具")
+                    legendItem(color: Color(red: 0.47, green: 0.31, blue: 0.72), label: "樑柱標記")
                 }
                 .font(.caption2)
                 .padding(.horizontal, 14)

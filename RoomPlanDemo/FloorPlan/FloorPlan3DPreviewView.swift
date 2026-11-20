@@ -23,6 +23,10 @@ struct FloorPlan3DPreviewView: UIViewRepresentable {
         let scene = SCNScene()
         let rootNode = scene.rootNode
         let scale = CGFloat(DrawParameters.scalingFactor)
+        let geometry = FloorPlanGeometry(
+            capturedRoom: capturedRoom,
+            editState: editState
+        )
 
         var minX = Float.greatestFiniteMagnitude
         var maxX = -Float.greatestFiniteMagnitude
@@ -37,60 +41,100 @@ struct FloorPlan3DPreviewView: UIViewRepresentable {
             maxZ = max(maxZ, z + radius)
         }
 
-        for surface in capturedRoom.walls + capturedRoom.doors + capturedRoom.openings + capturedRoom.windows {
-            let isWall: Bool
+        for wall in geometry.joinedWallSegments {
+            let width = max(wall.length / scale, 0.12)
+            let height = max(wall.heightInMeters, 0.1)
+            let depth = max(wall.depthInMeters, 0.08)
+            let center = CGPoint(
+                x: -wall.midpoint.x / scale,
+                y: -wall.midpoint.y / scale
+            )
+            let yaw = -wall.angle
+            let box = SCNBox(width: width, height: height, length: depth, chamferRadius: 0)
+            box.firstMaterial = makeMaterial(
+                color: UIColor(red: 0.76, green: 0.79, blue: 0.84, alpha: 1),
+                transparency: 0.52
+            )
+            let node = SCNNode(geometry: box)
+            node.position = SCNVector3(Float(center.x), Float(height / 2), Float(center.y))
+            node.eulerAngles = SCNVector3(0, Float(yaw), 0)
+            node.name = "wall"
+            rootNode.addChildNode(node)
+
+            includeBounds(
+                x: Float(center.x),
+                z: Float(center.y),
+                radius: Float(width / 2 + depth)
+            )
+            maxHeight = max(maxHeight, Float(height))
+        }
+
+        for surface in geometry.surfaces where !surface.isWallGeometry {
+            let representation = surface.effectiveRepresentation
+            if representation == .wideOpening {
+                continue
+            }
+            if representation == .beam || representation == .column {
+                let width = max(surface.widthInMeters, 0.12)
+                let depth = max(surface.depthInMeters, 0.08)
+                let height = representation == .beam
+                    ? max(surface.heightInMeters * 0.12, 0.2)
+                    : surface.heightInMeters
+                let worldCenter = surface.worldCenter
+                let centerY = representation == .beam
+                    ? max(surface.heightInMeters - height / 2, height / 2)
+                    : height / 2
+                let box = SCNBox(width: width, height: height, length: depth, chamferRadius: 0)
+                box.firstMaterial = makeMaterial(color: UIColor(red: 0.47, green: 0.31, blue: 0.72, alpha: 1))
+                let node = SCNNode(geometry: box)
+                node.position = SCNVector3(Float(worldCenter.x), Float(centerY), Float(worldCenter.y))
+                node.eulerAngles = SCNVector3(0, Float(-surface.angle), 0)
+                node.name = representation == .beam ? "beamMarker" : "columnMarker"
+                rootNode.addChildNode(node)
+                includeBounds(
+                    x: Float(worldCenter.x),
+                    z: Float(worldCenter.y),
+                    radius: Float(width / 2 + depth)
+                )
+                maxHeight = max(maxHeight, Float(centerY + height / 2))
+                continue
+            }
+
             let isDoor: Bool
             let isOpening: Bool
             let color: UIColor
             let transparency: CGFloat
-            switch surface.category {
+            switch surface.source.category {
             case .wall:
-                isWall = true
-                isDoor = false
-                isOpening = false
-                color = UIColor(red: 0.76, green: 0.79, blue: 0.84, alpha: 1)
-                transparency = 0.52
+                continue
             case .door:
-                isWall = false
                 isDoor = true
                 isOpening = false
                 color = UIColor(red: 0.68, green: 0.39, blue: 0.22, alpha: 1)
                 transparency = 1
             case .opening:
-                isWall = false
                 isDoor = false
                 isOpening = true
                 color = UIColor(red: 0.38, green: 0.72, blue: 0.69, alpha: 1)
                 transparency = 0.24
             case .window:
-                isWall = false
                 isDoor = false
                 isOpening = false
                 color = UIColor(red: 0.22, green: 0.57, blue: 0.86, alpha: 1)
-                transparency = 0.72
+                transparency = surface.isFloorToCeilingGlass ? 0.45 : 0.72
             default:
                 continue
             }
 
-            let savedState = editState.surfaces[surface.identifier.uuidString]
-            let planX = CGFloat(savedState?.x ?? Double(-CGFloat(surface.transform.position.x) * scale))
-            let planY = CGFloat(savedState?.y ?? Double(CGFloat(surface.transform.position.z) * scale))
-            let centerX = Float(-planX / scale)
-            let centerZ = Float(-planY / scale)
-            let planAngle = CGFloat(
-                savedState?.zRotation
-                    ?? Double(-CGFloat(surface.transform.eulerAngles.z - surface.transform.eulerAngles.y))
-            )
-            let yaw = Float(-planAngle)
-            let savedWidth = savedState.map { $0.halfLength * 2 } ?? Double(surface.dimensions.x)
-            let width = max(CGFloat(savedWidth), 0.1)
-            let fallbackHeight: CGFloat = isWall ? 2.6 : (isDoor || isOpening) ? 2.05 : 1.2
-            let measuredHeight = CGFloat(surface.dimensions.y)
-            let height = measuredHeight.isFinite && measuredHeight > 0.1 ? measuredHeight : fallbackHeight
-            let depth = max(CGFloat(surface.dimensions.z), 0.08)
-            let centerY = max(height / 2, CGFloat(surface.transform.position.y))
+            let centerX = Float(surface.worldCenter.x)
+            let centerZ = Float(surface.worldCenter.y)
+            let yaw = Float(-surface.angle)
+            let width = max(surface.widthInMeters, 0.1)
+            let height = surface.heightInMeters
+            let depth = max(surface.depthInMeters, 0.08)
+            let centerY = max(height / 2, surface.centerHeightInMeters)
 
-            let boxDepth = isWall ? depth : max(depth, 0.06)
+            let boxDepth = max(depth, 0.06)
             let box = SCNBox(
                 width: width,
                 height: height,
@@ -99,14 +143,14 @@ struct FloorPlan3DPreviewView: UIViewRepresentable {
             )
             box.firstMaterial = makeMaterial(color: color, transparency: transparency)
             let node = SCNNode(geometry: box)
-            let frontOffset: Float = isWall ? 0 : Float(boxDepth / 2 + 0.008)
+            let frontOffset = Float(boxDepth / 2 + 0.008)
             node.position = SCNVector3(
                 centerX + sin(yaw) * frontOffset,
                 Float(centerY),
                 centerZ + cos(yaw) * frontOffset
             )
             node.eulerAngles = SCNVector3(0, yaw, 0)
-            node.name = isWall ? "wall" : isDoor ? "door" : isOpening ? "opening" : "window"
+            node.name = isDoor ? "door" : isOpening ? "opening" : "window"
             rootNode.addChildNode(node)
 
             let horizontalRadius = Float(width / 2 + boxDepth)
@@ -114,26 +158,19 @@ struct FloorPlan3DPreviewView: UIViewRepresentable {
             maxHeight = max(maxHeight, Float(centerY + height / 2))
         }
 
-        for object in capturedRoom.objects {
-            let savedState = editState.objects[object.identifier.uuidString]
-            let width = max(CGFloat(object.dimensions.x) * CGFloat(abs(savedState?.xScale ?? 1)), 0.2)
-            let height = max(CGFloat(object.dimensions.y), 0.25)
-            let depth = max(CGFloat(object.dimensions.z) * CGFloat(abs(savedState?.yScale ?? 1)), 0.2)
-            let planX = CGFloat(savedState?.x ?? Double(-CGFloat(object.transform.position.x) * scale))
-            let planY = CGFloat(savedState?.y ?? Double(CGFloat(object.transform.position.z) * scale))
-            let centerX = Float(-planX / scale)
-            let centerZ = Float(-planY / scale)
-            let planAngle = CGFloat(
-                savedState?.zRotation
-                    ?? Double(-CGFloat(object.transform.eulerAngles.z - object.transform.eulerAngles.y))
-            )
-            let centerY = max(height / 2, CGFloat(object.transform.position.y))
+        for object in geometry.objects {
+            let width = max(object.widthInMeters, 0.2)
+            let height = object.heightInMeters
+            let depth = max(object.depthInMeters, 0.2)
+            let centerX = Float(object.worldCenter.x)
+            let centerZ = Float(object.worldCenter.y)
+            let centerY = max(height / 2, object.centerHeightInMeters)
 
             let box = SCNBox(width: width, height: height, length: depth, chamferRadius: 0.025)
-            box.firstMaterial = makeMaterial(color: furnitureColor(for: object.category))
+            box.firstMaterial = makeMaterial(color: furnitureColor(for: object.source.category))
             let node = SCNNode(geometry: box)
             node.position = SCNVector3(centerX, Float(centerY), centerZ)
-            node.eulerAngles = SCNVector3(0, Float(-planAngle), 0)
+            node.eulerAngles = SCNVector3(0, Float(-object.angle), 0)
             node.name = "furniture"
             rootNode.addChildNode(node)
 
@@ -142,37 +179,26 @@ struct FloorPlan3DPreviewView: UIViewRepresentable {
             maxHeight = max(maxHeight, Float(centerY + height / 2))
         }
 
-        if let manualObjects = editState.manualObjects {
-            for manualObject in manualObjects {
-                guard let category = try? JSONDecoder().decode(
-                    CapturedRoom.Object.Category.self,
-                    from: manualObject.categoryData
-                ) else {
-                    continue
-                }
+        for manualObject in geometry.manualObjects {
+            let width = max(manualObject.widthInMeters, 0.2)
+            let depth = max(manualObject.depthInMeters, 0.2)
+            let height = manualObject.heightInMeters
+            let centerX = Float(manualObject.worldCenter.x)
+            let centerZ = Float(manualObject.worldCenter.y)
+            let box = SCNBox(width: width, height: height, length: depth, chamferRadius: 0.025)
+            box.firstMaterial = makeMaterial(color: furnitureColor(for: manualObject.category))
+            let node = SCNNode(geometry: box)
+            node.position = SCNVector3(centerX, Float(height / 2), centerZ)
+            node.eulerAngles = SCNVector3(0, Float(-manualObject.angle), 0)
+            node.name = "manualFurniture"
+            rootNode.addChildNode(node)
 
-                let width = max(abs(Float(manualObject.xScale)) * 80 / Float(scale), 0.2)
-                let depth = max(abs(Float(manualObject.yScale)) * 60 / Float(scale), 0.2)
-                let height: Float = 0.75
-                let centerX = Float(-manualObject.x / Double(scale))
-                let centerZ = Float(-manualObject.y / Double(scale))
-                let centerY = height / 2
-                let box = SCNBox(
-                    width: CGFloat(width),
-                    height: CGFloat(height),
-                    length: CGFloat(depth),
-                    chamferRadius: 0.025
-                )
-                box.firstMaterial = makeMaterial(color: furnitureColor(for: category))
-                let node = SCNNode(geometry: box)
-                node.position = SCNVector3(centerX, centerY, centerZ)
-                node.eulerAngles = SCNVector3(0, Float(-manualObject.zRotation), 0)
-                node.name = "manualFurniture"
-                rootNode.addChildNode(node)
-
-                includeBounds(x: centerX, z: centerZ, radius: (width * width + depth * depth).squareRoot() / 2)
-                maxHeight = max(maxHeight, height)
-            }
+            includeBounds(
+                x: centerX,
+                z: centerZ,
+                radius: Float((width * width + depth * depth).squareRoot() / 2)
+            )
+            maxHeight = max(maxHeight, Float(height))
         }
 
         if minX == Float.greatestFiniteMagnitude {

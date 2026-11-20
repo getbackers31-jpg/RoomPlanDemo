@@ -40,12 +40,130 @@ struct SavedAnnotationState: Codable {
     let alpha: Double
 }
 
+enum DisplayUnit: String, Codable, Equatable {
+    case centimeter
+    case millimeter
+}
+
+enum EditStateDateFormatter {
+    static func makeFormatter() -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone.current
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }
+    
+    static func string(from date: Date) -> String {
+        makeFormatter().string(from: date)
+    }
+    
+    static func nowString() -> String {
+        string(from: Date())
+    }
+}
+
+struct SavedCalibrationState: Codable, Equatable {
+    let scaleFactor: Double
+    let referenceOriginalMeters: Double
+    let referenceMeasuredMeters: Double
+    let calibratedAt: String
+}
+
 struct FloorPlanEditState: Codable {
+    static let currentSchemaVersion: Int = 2
+    
+    static var currentAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3.0"
+    }
+    
+    var schemaVersion: Int
+    var appVersion: String
+    var createdAt: String
+    var modifiedAt: String
+    var displayUnit: DisplayUnit
+    var calibration: SavedCalibrationState?
+    
     let surfaces: [String: SavedSurfaceState]
     let objects: [String: SavedObjectState]
     let cameraRotation: Double
     var manualObjects: [SavedManualObjectState]? = nil
     var annotations: [SavedAnnotationState]? = nil
+    
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case appVersion
+        case createdAt
+        case modifiedAt
+        case displayUnit
+        case calibration
+        case surfaces
+        case objects
+        case cameraRotation
+        case manualObjects
+        case annotations
+    }
+    
+    init(
+        schemaVersion: Int = FloorPlanEditState.currentSchemaVersion,
+        appVersion: String = FloorPlanEditState.currentAppVersion,
+        createdAt: String? = nil,
+        modifiedAt: String? = nil,
+        displayUnit: DisplayUnit = .centimeter,
+        calibration: SavedCalibrationState? = nil,
+        surfaces: [String: SavedSurfaceState],
+        objects: [String: SavedObjectState],
+        cameraRotation: Double,
+        manualObjects: [SavedManualObjectState]? = nil,
+        annotations: [SavedAnnotationState]? = nil
+    ) {
+        let now = EditStateDateFormatter.nowString()
+        self.schemaVersion = schemaVersion
+        self.appVersion = appVersion
+        self.createdAt = (createdAt?.isEmpty == false) ? createdAt! : now
+        self.modifiedAt = (modifiedAt?.isEmpty == false) ? modifiedAt! : now
+        self.displayUnit = displayUnit
+        self.calibration = calibration
+        self.surfaces = surfaces
+        self.objects = objects
+        self.cameraRotation = cameraRotation
+        self.manualObjects = manualObjects
+        self.annotations = annotations
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "0.2.0"
+        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        self.modifiedAt = try container.decodeIfPresent(String.self, forKey: .modifiedAt) ?? ""
+        self.displayUnit = try container.decodeIfPresent(DisplayUnit.self, forKey: .displayUnit) ?? .centimeter
+        self.calibration = try container.decodeIfPresent(SavedCalibrationState.self, forKey: .calibration)
+        self.surfaces = try container.decodeIfPresent([String: SavedSurfaceState].self, forKey: .surfaces) ?? [:]
+        self.objects = try container.decodeIfPresent([String: SavedObjectState].self, forKey: .objects) ?? [:]
+        self.cameraRotation = try container.decodeIfPresent(Double.self, forKey: .cameraRotation) ?? 0.0
+        self.manualObjects = try container.decodeIfPresent([SavedManualObjectState].self, forKey: .manualObjects)
+        self.annotations = try container.decodeIfPresent([SavedAnnotationState].self, forKey: .annotations)
+    }
+    
+    static func migrateIfNeeded(
+        _ state: FloorPlanEditState,
+        fallbackCreatedAt: Date? = nil,
+        fallbackModifiedAt: Date? = nil
+    ) -> FloorPlanEditState {
+        var migrated = state
+        if migrated.schemaVersion < currentSchemaVersion {
+            if migrated.createdAt.isEmpty {
+                migrated.createdAt = EditStateDateFormatter.string(from: fallbackCreatedAt ?? Date())
+            }
+            if migrated.modifiedAt.isEmpty {
+                migrated.modifiedAt = EditStateDateFormatter.string(from: fallbackModifiedAt ?? fallbackCreatedAt ?? Date())
+            }
+            migrated.schemaVersion = currentSchemaVersion
+        } else if migrated.createdAt.isEmpty {
+            migrated.createdAt = EditStateDateFormatter.string(from: fallbackCreatedAt ?? Date())
+        }
+        return migrated
+    }
 }
 
 struct SavedRoomProject: Identifiable, Codable, Equatable {
@@ -122,19 +240,29 @@ final class RoomProjectStore: ObservableObject {
         let roomURL = storageDirectory.appendingPathComponent(roomFile)
         let editURL = storageDirectory.appendingPathComponent(editFile)
         
+        let now = Date()
+        let nowISO = EditStateDateFormatter.string(from: now)
+        let existingProject = projects.first(where: { $0.id == id })
+        var stateToSave = editState
+        stateToSave.schemaVersion = FloorPlanEditState.currentSchemaVersion
+        stateToSave.appVersion = FloorPlanEditState.currentAppVersion
+        if stateToSave.createdAt.isEmpty {
+            stateToSave.createdAt = existingProject.map { EditStateDateFormatter.string(from: $0.createdAt) } ?? nowISO
+        }
+        stateToSave.modifiedAt = nowISO
+        
         let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
             let roomData = try encoder.encode(capturedRoom)
             try roomData.write(to: roomURL, options: .atomic)
             
-            let editData = try encoder.encode(editState)
+            let editData = try encoder.encode(stateToSave)
             try editData.write(to: editURL, options: .atomic)
         } catch {
             print("RoomProjectStore 存檔失敗: \(error.localizedDescription)")
             return nil
         }
-        
-        let now = Date()
         let project: SavedRoomProject
         if let idx = projects.firstIndex(where: { $0.id == id }) {
             var updated = projects[idx]
@@ -174,7 +302,24 @@ final class RoomProjectStore: ObservableObject {
     func loadEditState(for project: SavedRoomProject) -> FloorPlanEditState? {
         let url = storageDirectory.appendingPathComponent(project.editStateFileName)
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(FloorPlanEditState.self, from: data)
+        guard let decoded = try? JSONDecoder().decode(FloorPlanEditState.self, from: data) else { return nil }
+        
+        if decoded.schemaVersion < FloorPlanEditState.currentSchemaVersion {
+            let legacyBackupName = project.editStateFileName.replacingOccurrences(
+                of: ".json",
+                with: ".v\(decoded.schemaVersion).bak.json"
+            )
+            let legacyBackupURL = storageDirectory.appendingPathComponent(legacyBackupName)
+            if !FileManager.default.fileExists(atPath: legacyBackupURL.path) {
+                try? FileManager.default.copyItem(at: url, to: legacyBackupURL)
+            }
+            return FloorPlanEditState.migrateIfNeeded(
+                decoded,
+                fallbackCreatedAt: project.createdAt,
+                fallbackModifiedAt: project.updatedAt
+            )
+        }
+        return decoded
     }
     
     func deleteProject(_ project: SavedRoomProject) {
@@ -228,4 +373,7 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var shouldSaveProject: Bool = false
     @Published var autoOrthogonalizeOnLoad: Bool = false
     var initialEditState: FloorPlanEditState? = nil
+    var editStateCreatedAt: String? = nil
+    var displayUnit: DisplayUnit = .centimeter
+    var calibrationState: SavedCalibrationState? = nil
 }

@@ -144,6 +144,9 @@ extension FloorPlanScene {
             ))
         }
         return FloorPlanEditState(
+            createdAt: viewModel.editStateCreatedAt,
+            displayUnit: viewModel.displayUnit,
+            calibration: viewModel.calibrationState,
             surfaces: surfaceMap,
             objects: objectMap,
             cameraRotation: Double(camera?.zRotation ?? 0),
@@ -172,6 +175,9 @@ extension FloorPlanScene {
                 obj.updateSizeLabel()
             }
         }
+        viewModel.editStateCreatedAt = state.createdAt
+        viewModel.displayUnit = state.displayUnit
+        viewModel.calibrationState = state.calibration
         camera?.zRotation = CGFloat(state.cameraRotation)
         if let manualObjects = state.manualObjects, let firstObject = objects.first {
             for m in manualObjects {
@@ -214,6 +220,9 @@ extension FloorPlanScene {
         DispatchQueue.main.async { [weak self] in
             if let project = saved {
                 self?.viewModel.savedProjectID = project.id
+                if self?.viewModel.editStateCreatedAt == nil {
+                    self?.viewModel.editStateCreatedAt = editState.createdAt
+                }
                 self?.viewModel.statusToastMessage = "已儲存「\(project.name)」至空間紀錄庫！"
             } else {
                 self?.viewModel.statusToastMessage = "儲存失敗，請稍後再試"

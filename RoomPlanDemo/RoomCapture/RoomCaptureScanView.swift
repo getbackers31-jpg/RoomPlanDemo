@@ -1,7 +1,6 @@
 import SwiftUI
 import SpriteKit
 import RoomPlan
-import SceneKit
 
 struct RoomCaptureScanView: View {
     @Environment(\.dismiss) private var dismiss

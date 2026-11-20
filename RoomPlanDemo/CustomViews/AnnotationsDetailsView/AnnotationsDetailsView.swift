@@ -43,6 +43,7 @@ struct AnnotationsDetailsView: View {
             TextField("輸入新標題", text: $newTitle)
             Button("儲存") {
                 selectedAnnotation?.updateTitle(newTitle)
+                NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "edit_annotation_title")
             }
             Button("取消", role: .cancel) {}
         })
@@ -50,6 +51,7 @@ struct AnnotationsDetailsView: View {
             TextField("輸入新副標題", text: $newTitle)
             Button("儲存") {
                 selectedAnnotation?.updateSubTitle(newTitle)
+                NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "edit_annotation_subtitle")
             }
             Button("取消", role: .cancel) {}
         })
@@ -192,26 +194,17 @@ private extension AnnotationsDetailsView {
             selectedAnnotation?.removeFromParent(); NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_annotation")
             selectedAnnotation = nil
         case .rotate:
-            // Increment the angle by 15 degrees
-            let incrementedAngle = angle + 10
-            
-            // Snap the angle to the nearest 15 degrees (although this may not be necessary since increments are already 15)
-            let snappedAngle = round(incrementedAngle / 15) * 15
-            
-            // Normalize the angle to keep it within 0–360 degrees
-            let normalizedAngle = snappedAngle.truncatingRemainder(dividingBy: 360)
-            
-            // Update the annotation's angle
+            let normalizedAngle = (angle + 15).truncatingRemainder(dividingBy: 360)
             selectedAnnotation?.updateAngle(to: normalizedAngle)
-            
-            // Update the local angle variable
             angle = normalizedAngle
+            NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "rotate_annotation")
         default: break
         }
     }
     
     func updateColor(_ color: MainColor) {
         selectedAnnotation?.updateColor(color.skColor)
+        NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "edit_annotation_color")
     }
 }
 

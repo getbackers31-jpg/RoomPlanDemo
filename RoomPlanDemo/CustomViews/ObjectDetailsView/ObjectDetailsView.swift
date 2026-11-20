@@ -120,20 +120,10 @@ private extension ObjectDetailsView {
             case .rotate:
                 Button {
                     withAnimation {
-                        // Increment the angle by 15 degrees
-                        let incrementedAngle = angle + 10
-                        
-                        // Snap the angle to the nearest 15 degrees (although this may not be necessary since increments are already 15)
-                        let snappedAngle = round(incrementedAngle / 15) * 15
-                        
-                        // Normalize the angle to keep it within 0–360 degrees
-                        let normalizedAngle = snappedAngle.truncatingRemainder(dividingBy: 360)
-                        
-                        // Update the annotation's angle
+                        let normalizedAngle = (angle + 15).truncatingRemainder(dividingBy: 360)
                         object.updateAngle(to: normalizedAngle)
-                        
-                        // Update the local angle variable
                         angle = normalizedAngle
+                        NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "rotate_object")
                     }
                 } label: {
                     VStack {

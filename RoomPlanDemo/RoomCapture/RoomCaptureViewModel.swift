@@ -160,13 +160,13 @@ private extension RoomCaptureViewModel {
         let draftName = "自動儲存草稿-\(timestamp)"
         
         if let project = RoomProjectStore.shared.saveProject(
-            capturedRoom: room,
-            editState: nil,
-            projectID: nil,
+            existingID: nil,
             name: draftName,
             floorLabel: "1F",
             areaPing: 0,
-            areaSqm: 0
+            areaSqm: 0,
+            capturedRoom: room,
+            editState: FloorPlanEditState(surfaces: [:], objects: [:], cameraRotation: 0.0)
         ) {
             print("Successfully auto-saved draft: \(project.id)")
         }

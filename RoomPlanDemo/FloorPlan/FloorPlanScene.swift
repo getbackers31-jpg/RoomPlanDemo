@@ -220,6 +220,10 @@ extension FloorPlanScene {
         DispatchQueue.main.async { [weak self] in
             if let project = saved {
                 self?.viewModel.savedProjectID = project.id
+                self?.viewModel.loadWallLockPreference(for: project.id)
+                if self?.viewModel.isWallLocked == true {
+                    UserDefaults.standard.set(true, forKey: "wall_locked_\(project.id.uuidString)")
+                }
                 if self?.viewModel.editStateCreatedAt == nil {
                     self?.viewModel.editStateCreatedAt = editState.createdAt
                 }
@@ -714,6 +718,10 @@ extension FloorPlanScene {
 // MARK: - 核心工程演算法：世界座標正交直角對齊 & 單邊基準尺全域縮放
 extension FloorPlanScene {
     func orthogonalizeWalls(recordUndo: Bool = true) {
+        if recordUndo && viewModel.isWallLocked {
+            viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再執行直角對齊"
+            return
+        }
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let wallNodes = surfaceNodes.filter { $0.capturedSurface.category == .wall }
         guard let primaryWall = wallNodes.max(by: { $0.halfLength < $1.halfLength }) else { return }
@@ -748,6 +756,10 @@ extension FloorPlanScene {
     }
     
     func calibrateWholeRoom(by ratio: CGFloat) {
+        if viewModel.isWallLocked {
+            viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再執行全域校準"
+            return
+        }
         viewModel.markDirty(reason: "calibrate_whole_room")
         guard ratio > 0.1 && ratio < 10.0 else { return }
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }

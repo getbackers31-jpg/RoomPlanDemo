@@ -475,6 +475,25 @@ final class FloorPlanViewModel: ObservableObject {
         }
     }
     
+    // Commit 5 (v0.3.0)：牆體鎖定（操作偏好，不納入幾何資料）
+    @Published var isWallLocked: Bool = false
+    
+    func setWallLocked(_ locked: Bool) {
+        if isWallLocked == locked { return }
+        isWallLocked = locked
+        if let pid = savedProjectID {
+            UserDefaults.standard.set(locked, forKey: "wall_locked_\(pid.uuidString)")
+        }
+    }
+    
+    func loadWallLockPreference(for projectID: UUID?) {
+        guard let pid = projectID else { return }
+        let key = "wall_locked_\(pid.uuidString)"
+        if UserDefaults.standard.object(forKey: key) != nil {
+            isWallLocked = UserDefaults.standard.bool(forKey: key)
+        }
+    }
+    
     func clearDirty() {
         DispatchQueue.main.async {
             self.isDirty = false

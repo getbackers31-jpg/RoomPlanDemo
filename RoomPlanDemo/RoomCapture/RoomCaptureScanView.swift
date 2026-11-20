@@ -110,6 +110,7 @@ struct RoomCaptureScanView: View {
         .onAppear {
             if let project = savedProject {
                 floorPlanViewModel.savedProjectID = project.id
+                floorPlanViewModel.loadWallLockPreference(for: project.id)
                 floorPlanViewModel.roomUsage = project.name
                 floorPlanViewModel.floorLabel = project.floorLabel
                 floorPlanViewModel.roomAreaPing = project.areaPing
@@ -311,6 +312,14 @@ private extension RoomCaptureScanView {
                         isActive: floorPlanViewModel.showFurniture
                     ) {
                         floorPlanViewModel.showFurniture.toggle()
+                    }
+                    
+                    toggleChip(
+                        title: floorPlanViewModel.isWallLocked ? "已鎖牆" : "鎖牆",
+                        icon: floorPlanViewModel.isWallLocked ? "lock.fill" : "lock.open",
+                        isActive: floorPlanViewModel.isWallLocked
+                    ) {
+                        floorPlanViewModel.setWallLocked(!floorPlanViewModel.isWallLocked)
                     }
                     
                     toggleChip(

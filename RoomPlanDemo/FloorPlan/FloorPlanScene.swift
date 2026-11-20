@@ -24,6 +24,11 @@ private struct SceneSnapshot {
     let cameraRotation: CGFloat
 }
 
+private struct PlanLineSegment {
+    var start: CGPoint
+    var end: CGPoint
+}
+
 final class FloorPlanScene: SKScene {
     let viewModel: FloorPlanViewModel
     private var previousCameraScale = CGFloat()
@@ -34,6 +39,7 @@ final class FloorPlanScene: SKScene {
     let capturedRoom: CapturedRoom
     
     private var gridNode: SKNode?
+    private var wallJointNode: SKShapeNode?
     private var exteriorDimensionsNode: SKNode?
     
     private var undoStack: [SceneSnapshot] = []
@@ -58,11 +64,6 @@ final class FloorPlanScene: SKScene {
         
         if let savedState = viewModel.initialEditState {
             applyEditState(savedState)
-        } else if viewModel.autoOrthogonalizeOnLoad {
-            orthogonalizeWalls(recordUndo: false)
-            DispatchQueue.main.async { [weak self] in
-                self?.viewModel.autoOrthogonalizeOnLoad = false
-            }
         }
         
         recalculateAreaAndExteriorDimensions()
@@ -281,22 +282,20 @@ extension FloorPlanScene {
     }
     
     func recalculateAreaAndExteriorDimensions() {
+        let wallNodes = children.compactMap { $0 as? FloorPlanSurface }.filter {
+            $0.capturedSurface.category == .wall
+        }
+        let connectedWalls = connectWallCorners(mergeCollinearSegments(makeSegments(from: wallNodes)))
+        updateWallJoinOverlay(with: connectedWalls)
+
         let boundaryNodes = children.compactMap { $0 as? FloorPlanSurface }.filter {
             $0.capturedSurface.category == .wall || $0.capturedSurface.category == .opening
         }
         guard !boundaryNodes.isEmpty else { return }
         
-        var segments: [(CGPoint, CGPoint)] = []
-        var rawPoints: [CGPoint] = []
-        for node in boundaryNodes {
-            let cosA = cos(node.zRotation)
-            let sinA = sin(node.zRotation)
-            let p1 = CGPoint(x: node.position.x - node.halfLength * cosA, y: node.position.y - node.halfLength * sinA)
-            let p2 = CGPoint(x: node.position.x + node.halfLength * cosA, y: node.position.y + node.halfLength * sinA)
-            segments.append((p1, p2))
-            rawPoints.append(p1)
-            rawPoints.append(p2)
-        }
+        let boundarySegments = connectWallCorners(mergeCollinearSegments(makeSegments(from: boundaryNodes)))
+        let segments = boundarySegments.map { ($0.start, $0.end) }
+        let rawPoints = boundarySegments.flatMap { [$0.start, $0.end] }
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -312,7 +311,216 @@ extension FloorPlanScene {
             }
         }
     }
-    
+
+    private func makeSegments(from nodes: [FloorPlanSurface]) -> [PlanLineSegment] {
+        nodes.map { node in
+            let direction = CGPoint(x: cos(node.zRotation), y: sin(node.zRotation))
+            return PlanLineSegment(
+                start: CGPoint(
+                    x: node.position.x - node.halfLength * direction.x,
+                    y: node.position.y - node.halfLength * direction.y
+                ),
+                end: CGPoint(
+                    x: node.position.x + node.halfLength * direction.x,
+                    y: node.position.y + node.halfLength * direction.y
+                )
+            )
+        }
+    }
+
+    private func mergeCollinearSegments(_ source: [PlanLineSegment]) -> [PlanLineSegment] {
+        var segments = source.filter {
+            hypot($0.end.x - $0.start.x, $0.end.y - $0.start.y) > 1
+        }
+        let parallelTolerance = sin(CGFloat.pi / 90)
+        let offsetTolerance = DrawParameters.wallWidth * 0.5
+        let gapTolerance = DrawParameters.wallWidth * 1.5
+
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            guard segments.count > 1 else { break }
+
+            mergeSearch: for firstIndex in 0..<(segments.count - 1) {
+                for secondIndex in (firstIndex + 1)..<segments.count {
+                    let first = segments[firstIndex]
+                    let second = segments[secondIndex]
+                    let firstVector = CGPoint(x: first.end.x - first.start.x, y: first.end.y - first.start.y)
+                    let secondVector = CGPoint(x: second.end.x - second.start.x, y: second.end.y - second.start.y)
+                    let firstLength = hypot(firstVector.x, firstVector.y)
+                    let secondLength = hypot(secondVector.x, secondVector.y)
+                    guard firstLength > 1, secondLength > 1 else { continue }
+
+                    let firstDirection = CGPoint(x: firstVector.x / firstLength, y: firstVector.y / firstLength)
+                    let secondDirection = CGPoint(x: secondVector.x / secondLength, y: secondVector.y / secondLength)
+                    guard abs(crossProduct(firstDirection, secondDirection)) <= parallelTolerance else { continue }
+
+                    let directionSign: CGFloat = dotProduct(firstDirection, secondDirection) < 0 ? -1 : 1
+                    let combinedVector = CGPoint(
+                        x: firstVector.x + secondVector.x * directionSign,
+                        y: firstVector.y + secondVector.y * directionSign
+                    )
+                    let combinedLength = hypot(combinedVector.x, combinedVector.y)
+                    guard combinedLength > 1 else { continue }
+                    let mergeDirection = CGPoint(
+                        x: combinedVector.x / combinedLength,
+                        y: combinedVector.y / combinedLength
+                    )
+                    let normal = CGPoint(x: -mergeDirection.y, y: mergeDirection.x)
+                    let firstStart = dotProduct(first.start, mergeDirection)
+                    let firstEnd = dotProduct(first.end, mergeDirection)
+                    let secondStart = dotProduct(second.start, mergeDirection)
+                    let secondEnd = dotProduct(second.end, mergeDirection)
+                    let firstMin = min(firstStart, firstEnd)
+                    let firstMax = max(firstStart, firstEnd)
+                    let secondMin = min(secondStart, secondEnd)
+                    let secondMax = max(secondStart, secondEnd)
+                    let gap = max(0, max(firstMin, secondMin) - min(firstMax, secondMax))
+                    guard gap <= gapTolerance else { continue }
+
+                    let overlapStart = max(firstMin, secondMin)
+                    let overlapEnd = min(firstMax, secondMax)
+                    let comparisonProjection = overlapStart <= overlapEnd
+                        ? (overlapStart + overlapEnd) / 2
+                        : (max(firstMin, secondMin) + min(firstMax, secondMax)) / 2
+                    let firstStartOffset = dotProduct(first.start, normal)
+                    let firstEndOffset = dotProduct(first.end, normal)
+                    let secondStartOffset = dotProduct(second.start, normal)
+                    let secondEndOffset = dotProduct(second.end, normal)
+                    let firstOffsetAtComparison = firstStartOffset
+                        + (comparisonProjection - firstStart) * (firstEndOffset - firstStartOffset) / (firstEnd - firstStart)
+                    let secondOffsetAtComparison = secondStartOffset
+                        + (comparisonProjection - secondStart) * (secondEndOffset - secondStartOffset) / (secondEnd - secondStart)
+                    guard abs(firstOffsetAtComparison - secondOffsetAtComparison) <= offsetTolerance else { continue }
+
+                    let minProjection = min(firstMin, secondMin)
+                    let maxProjection = max(firstMax, secondMax)
+                    let firstMidOffset = (firstStartOffset + firstEndOffset) / 2
+                    let secondMidOffset = (secondStartOffset + secondEndOffset) / 2
+                    let averageOffset = (
+                        firstMidOffset * firstLength + secondMidOffset * secondLength
+                    ) / (firstLength + secondLength)
+                    segments[firstIndex] = PlanLineSegment(
+                        start: CGPoint(
+                            x: mergeDirection.x * minProjection + normal.x * averageOffset,
+                            y: mergeDirection.y * minProjection + normal.y * averageOffset
+                        ),
+                        end: CGPoint(
+                            x: mergeDirection.x * maxProjection + normal.x * averageOffset,
+                            y: mergeDirection.y * maxProjection + normal.y * averageOffset
+                        )
+                    )
+                    segments.remove(at: secondIndex)
+                    didMerge = true
+                    break mergeSearch
+                }
+            }
+        }
+
+        return segments
+    }
+
+    private func connectWallCorners(_ source: [PlanLineSegment]) -> [PlanLineSegment] {
+        guard source.count > 1 else { return source }
+
+        var connected = source
+        let minimumCrossProduct = sin(CGFloat.pi / 90)
+        let endpointTolerance = DrawParameters.wallWidth * 2
+        let maximumMiterExtension = DrawParameters.wallWidth * 3
+
+        func endpoint(_ isStart: Bool, of segment: PlanLineSegment) -> CGPoint {
+            isStart ? segment.start : segment.end
+        }
+
+        for firstIndex in 0..<(source.count - 1) {
+            for secondIndex in (firstIndex + 1)..<source.count {
+                let first = source[firstIndex]
+                let second = source[secondIndex]
+                let firstVector = CGPoint(x: first.end.x - first.start.x, y: first.end.y - first.start.y)
+                let secondVector = CGPoint(x: second.end.x - second.start.x, y: second.end.y - second.start.y)
+                let firstLength = hypot(firstVector.x, firstVector.y)
+                let secondLength = hypot(secondVector.x, secondVector.y)
+                guard firstLength > 1, secondLength > 1 else { continue }
+
+                let firstDirection = CGPoint(x: firstVector.x / firstLength, y: firstVector.y / firstLength)
+                let secondDirection = CGPoint(x: secondVector.x / secondLength, y: secondVector.y / secondLength)
+                let determinant = crossProduct(firstDirection, secondDirection)
+                guard abs(determinant) > minimumCrossProduct else { continue }
+
+                var bestMatch: (point: CGPoint, firstIsStart: Bool, secondIsStart: Bool, score: CGFloat)?
+                for firstIsStart in [true, false] {
+                    let firstPoint = endpoint(firstIsStart, of: first)
+                    for secondIsStart in [true, false] {
+                        let secondPoint = endpoint(secondIsStart, of: second)
+                        let endpointDistance = hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y)
+                        guard endpointDistance <= endpointTolerance else { continue }
+
+                        let between = CGPoint(x: secondPoint.x - firstPoint.x, y: secondPoint.y - firstPoint.y)
+                        let distanceAlongFirst = crossProduct(between, secondDirection) / determinant
+                        let intersection = CGPoint(
+                            x: firstPoint.x + firstDirection.x * distanceAlongFirst,
+                            y: firstPoint.y + firstDirection.y * distanceAlongFirst
+                        )
+                        let firstExtension = hypot(intersection.x - firstPoint.x, intersection.y - firstPoint.y)
+                        let secondExtension = hypot(intersection.x - secondPoint.x, intersection.y - secondPoint.y)
+                        guard firstExtension <= maximumMiterExtension,
+                              secondExtension <= maximumMiterExtension else { continue }
+
+                        let score = endpointDistance + firstExtension + secondExtension
+                        if let currentMatch = bestMatch, currentMatch.score <= score {
+                            continue
+                        }
+                        bestMatch = (intersection, firstIsStart, secondIsStart, score)
+                    }
+                }
+
+                guard let match = bestMatch else { continue }
+                if match.firstIsStart {
+                    connected[firstIndex].start = match.point
+                } else {
+                    connected[firstIndex].end = match.point
+                }
+                if match.secondIsStart {
+                    connected[secondIndex].start = match.point
+                } else {
+                    connected[secondIndex].end = match.point
+                }
+            }
+        }
+
+        return connected
+    }
+
+    private func updateWallJoinOverlay(with segments: [PlanLineSegment]) {
+        wallJointNode?.removeFromParent()
+        guard !segments.isEmpty else {
+            wallJointNode = nil
+            return
+        }
+
+        let path = CGMutablePath()
+        for segment in segments {
+            path.move(to: segment.start)
+            path.addLine(to: segment.end)
+        }
+
+        let node = SKShapeNode(path: path)
+        node.strokeColor = AppTheme.wallStroke
+        node.lineWidth = DrawParameters.wallWidth
+        node.lineCap = .square
+        node.zPosition = -0.5
+        addChild(node)
+        wallJointNode = node
+    }
+
+    private func dotProduct(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        lhs.x * rhs.x + lhs.y * rhs.y
+    }
+
+    private func crossProduct(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        lhs.x * rhs.y - lhs.y * rhs.x
+    }
+
     private func computePolygonAreaPt2(from segments: [(CGPoint, CGPoint)]) -> Double {
         let tolerance: CGFloat = 40.0
         var vertices: [CGPoint] = []
@@ -721,46 +929,8 @@ extension FloorPlanScene {
     }
 }
 
-// MARK: - 核心工程演算法：世界座標正交直角對齊 & 單邊基準尺全域縮放
+// MARK: - 牆面接縫與全域校準
 extension FloorPlanScene {
-    func orthogonalizeWalls(recordUndo: Bool = true) {
-        if recordUndo && viewModel.isWallLocked {
-            viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再執行直角對齊"
-            return
-        }
-        let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
-        let wallNodes = surfaceNodes.filter { $0.capturedSurface.category == .wall }
-        guard let primaryWall = wallNodes.max(by: { $0.halfLength < $1.halfLength }) else { return }
-        
-        if recordUndo { pushUndoState(); viewModel.markDirty(reason: "orthogonalize") }
-        
-        let baseAngle = primaryWall.zRotation
-        rotateAllNodes(by: -baseAngle)
-        camera?.zRotation = 0
-        
-        let snapStep: CGFloat = .pi / 2
-        let maxDeviation: CGFloat = 20.0 * (.pi / 180.0)
-        var alignedCount = 0
-        
-        for node in surfaceNodes {
-            let nearestQuarter = round(node.zRotation / snapStep) * snapStep
-            let residual = atan2(sin(node.zRotation - nearestQuarter), cos(node.zRotation - nearestQuarter))
-            
-            if abs(residual) <= maxDeviation {
-                node.zRotation = nearestQuarter
-                node.updateDimensionLabel()
-                alignedCount += 1
-            }
-        }
-        
-        recalculateAreaAndExteriorDimensions()
-        recenterCamera(animated: recordUndo)
-        
-        if recordUndo {
-            viewModel.statusToastMessage = "已完成 \(alignedCount) 面牆體與門窗正交直角對齊"
-        }
-    }
-    
     func calibrateWholeRoom(by ratio: CGFloat) {
         if viewModel.isWallLocked {
             viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再執行全域校準"

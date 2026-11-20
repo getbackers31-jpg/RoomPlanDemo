@@ -84,13 +84,6 @@ private struct FloorPlanSceneCanvas: UIViewRepresentable {
             }
         }
         
-        if viewModel.shouldOrthogonalize {
-            DispatchQueue.main.async {
-                scene.orthogonalizeWalls()
-                viewModel.shouldOrthogonalize = false
-            }
-        }
-        
         if let ratio = viewModel.calibrationScaleRatio {
             DispatchQueue.main.async {
                 scene.calibrateWholeRoom(by: ratio)

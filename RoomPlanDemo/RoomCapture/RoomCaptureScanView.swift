@@ -239,12 +239,11 @@ private extension RoomCaptureScanView {
             
             if !viewModel.isScanning {
                 Button {
-                    floorPlanViewModel.autoOrthogonalizeOnLoad = true
                     viewModel.handleScanButtonTap()
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: "wand.and.stars")
-                        Text("檢視 2D 藍圖並自動直角對齊")
+                        Image(systemName: "map")
+                        Text("檢視 2D 藍圖")
                             .fontWeight(.bold)
                     }
                     .font(.subheadline)
@@ -390,10 +389,6 @@ private extension RoomCaptureScanView {
                     }
                     
                     Divider().frame(height: 20).background(Color.gray.opacity(0.5))
-                    
-                    actionChip(title: "直角對齊", icon: "angle", bg: AppTheme.accentBlue) {
-                        floorPlanViewModel.shouldOrthogonalize = true
-                    }
                     
                     actionChip(title: "轉 90°", icon: "rotate.right", bg: AppTheme.primaryBarBg) {
                         floorPlanViewModel.shouldRotate90 = true

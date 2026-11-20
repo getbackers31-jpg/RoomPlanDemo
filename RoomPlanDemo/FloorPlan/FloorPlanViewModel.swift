@@ -430,8 +430,7 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var shouldShareImage: Bool = false
     @Published var shareFormat: ImageFormat? = nil
     
-    // 正交直角對齊與基準尺全域校準
-    @Published var shouldOrthogonalize: Bool = false
+    // 基準尺全域校準
     @Published var calibrationScaleRatio: CGFloat? = nil
     @Published var statusToastMessage: String? = nil
     
@@ -455,7 +454,6 @@ final class FloorPlanViewModel: ObservableObject {
     // 第二階段：專案儲存與讀取狀態
     @Published var savedProjectID: UUID? = nil
     @Published var shouldSaveProject: Bool = false
-    @Published var autoOrthogonalizeOnLoad: Bool = false
     var initialEditState: FloorPlanEditState? = nil
     var editStateCreatedAt: String? = nil
     var displayUnit: DisplayUnit = .centimeter

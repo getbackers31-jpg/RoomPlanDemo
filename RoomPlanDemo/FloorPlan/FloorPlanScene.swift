@@ -1013,6 +1013,10 @@ extension FloorPlanScene {
                 
             case .door:
                 let lengthCm = halfLen * 2.0
+                if lengthCm > 150.0 {
+                    addLine(layer: "WINDOWS", x1: ax, y1: ay, x2: bx, y2: by)
+                    break
+                }
                 let openAngle = Double(surface.openDirection.angle)
                 let doorEndX = ax + lengthCm * cos(angle + openAngle)
                 let doorEndY = ay + lengthCm * sin(angle + openAngle)

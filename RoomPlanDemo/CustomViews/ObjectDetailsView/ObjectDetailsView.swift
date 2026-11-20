@@ -84,7 +84,7 @@ private extension ObjectDetailsView {
     @ViewBuilder
     func createTitleView(from surface: FloorPlanObject?) -> some View {
         if let object {
-            let objectCategory = object.capturedObject.category
+            let objectCategory = object.objectCategory
             
             Text("\(objectCategory.displayName)")
                 .font(.largeTitle)

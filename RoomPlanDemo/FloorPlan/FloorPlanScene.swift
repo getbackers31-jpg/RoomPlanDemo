@@ -116,7 +116,7 @@ extension FloorPlanScene {
                     yScale: Double(obj.yScale)
                 ))
             } else {
-                let key = obj.capturedObject.identifier.uuidString
+                guard let key = obj.capturedObject?.identifier.uuidString else { continue }
                 objectMap[key] = SavedObjectState(
                     x: Double(obj.position.x),
                     y: Double(obj.position.y),
@@ -166,7 +166,7 @@ extension FloorPlanScene {
             }
         }
         for obj in children.compactMap({ $0 as? FloorPlanObject }) {
-            let key = obj.capturedObject.identifier.uuidString
+            guard let key = obj.capturedObject?.identifier.uuidString else { continue }
             if let o = state.objects[key] {
                 obj.position = CGPoint(x: o.x, y: o.y)
                 obj.zRotation = CGFloat(o.zRotation)
@@ -179,10 +179,10 @@ extension FloorPlanScene {
         viewModel.displayUnit = state.displayUnit
         viewModel.calibrationState = state.calibration
         camera?.zRotation = CGFloat(state.cameraRotation)
-        if let manualObjects = state.manualObjects, let firstObject = objects.first {
+        if let manualObjects = state.manualObjects {
             for m in manualObjects {
                 if let cat = try? JSONDecoder().decode(CapturedRoom.Object.Category.self, from: m.categoryData) {
-                    let obj = FloorPlanObject(capturedObject: firstObject, withCategory: cat, objectPosition: CGPoint(x: m.x, y: m.y))
+                    let obj = FloorPlanObject(capturedObject: nil, withCategory: cat, objectPosition: CGPoint(x: m.x, y: m.y))
                     obj.name = "manual_object"
                     obj.userData = NSMutableDictionary(dictionary: ["manualCategoryData": m.categoryData])
                     obj.zRotation = CGFloat(m.zRotation)
@@ -921,12 +921,19 @@ private extension FloorPlanScene {
 
 // MARK: - 專業藍圖出圖（PNG / JPEG / PDF）與 AutoCAD DXF 產生器
 extension FloorPlanScene {
-    func addNewObject(with category: CapturedRoom.Object.Category) {
-        guard let camera = self.camera, let firstObject = objects.first else {
-            viewModel.statusToastMessage = "此空間未偵測到參考家具，無法新增物件"
-            return
+    private func preferredManualPlacementPoint() -> CGPoint {
+        if let cam = self.camera {
+            return cam.position
         }
-        let newFloorPlanObject = FloorPlanObject(capturedObject: firstObject, withCategory: category, objectPosition: camera.position)
+        if let rect = roomBoundingRect(padding: 0) {
+            return CGPoint(x: rect.midX, y: rect.midY)
+        }
+        return .zero
+    }
+    
+    func addNewObject(with category: CapturedRoom.Object.Category) {
+        let placement = preferredManualPlacementPoint()
+        let newFloorPlanObject = FloorPlanObject(capturedObject: nil, withCategory: category, objectPosition: placement)
         newFloorPlanObject.name = "manual_object"
         if let data = try? JSONEncoder().encode(category) {
             newFloorPlanObject.userData = NSMutableDictionary(dictionary: ["manualCategoryData": data])

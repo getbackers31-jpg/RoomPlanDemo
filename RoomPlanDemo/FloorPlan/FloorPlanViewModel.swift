@@ -203,24 +203,104 @@ final class RoomProjectStore: ObservableObject {
         loadIndex()
     }
     
-    func loadIndex() {
-        guard let data = try? Data(contentsOf: indexURL) else {
-            projects = []
-            return
+    private func backupURL(for url: URL) -> URL {
+        let name = url.lastPathComponent
+        let bakName: String
+        if name.hasSuffix(".json") {
+            bakName = String(name.dropLast(5)) + ".bak.json"
+        } else {
+            bakName = name + ".bak.json"
         }
+        return url.deletingLastPathComponent().appendingPathComponent(bakName)
+    }
+    
+    private func safeWrite<T: Codable>(
+        _ value: T,
+        to destinationURL: URL,
+        encoder: JSONEncoder,
+        decoder: JSONDecoder = JSONDecoder()
+    ) throws {
+        let fm = FileManager.default
+        let tmpURL = destinationURL.appendingPathExtension("tmp")
+        let bakURL = backupURL(for: destinationURL)
+        let bakTmpURL = bakURL.appendingPathExtension("tmp")
+        
+        defer {
+            if fm.fileExists(atPath: tmpURL.path) {
+                try? fm.removeItem(at: tmpURL)
+            }
+            if fm.fileExists(atPath: bakTmpURL.path) {
+                try? fm.removeItem(at: bakTmpURL)
+            }
+        }
+        
+        // 1. 新資料寫入 .tmp
+        let encodedData = try encoder.encode(value)
+        try encodedData.write(to: tmpURL, options: .atomic)
+        
+        // 2. 確認 .tmp 可以重新解碼
+        let verifyData = try Data(contentsOf: tmpURL)
+        _ = try decoder.decode(T.self, from: verifyData)
+        
+        // 3. 現有原檔先複製成 .bak.json（僅保留上一版）
+        if fm.fileExists(atPath: destinationURL.path) {
+            if fm.fileExists(atPath: bakTmpURL.path) {
+                try? fm.removeItem(at: bakTmpURL)
+            }
+            try fm.copyItem(at: destinationURL, to: bakTmpURL)
+            if fm.fileExists(atPath: bakURL.path) {
+                _ = try fm.replaceItemAt(bakURL, withItemAt: bakTmpURL)
+            } else {
+                try fm.moveItem(at: bakTmpURL, to: bakURL)
+            }
+        }
+        
+        // 4. 用 .tmp 原子替換正式檔（成功後 .tmp 已被移走）
+        if fm.fileExists(atPath: destinationURL.path) {
+            _ = try fm.replaceItemAt(destinationURL, withItemAt: tmpURL)
+        } else {
+            try fm.moveItem(at: tmpURL, to: destinationURL)
+        }
+    }
+    
+    private func loadWithBackupFallback<T: Decodable>(
+        _ type: T.Type,
+        from url: URL,
+        decoder: JSONDecoder = JSONDecoder()
+    ) -> T? {
+        if let data = try? Data(contentsOf: url),
+           let decoded = try? decoder.decode(type, from: data) {
+            return decoded
+        }
+        let bakURL = backupURL(for: url)
+        if let bakData = try? Data(contentsOf: bakURL),
+           let decoded = try? decoder.decode(type, from: bakData) {
+            print("RoomProjectStore 主檔異常，已自動從備份復原: \(bakURL.lastPathComponent)")
+            return decoded
+        }
+        return nil
+    }
+    
+    func loadIndex() {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? decoder.decode([SavedRoomProject].self, from: data) {
+        if let decoded = loadWithBackupFallback([SavedRoomProject].self, from: indexURL, decoder: decoder) {
             projects = decoded.sorted { $0.updatedAt > $1.updatedAt }
+        } else {
+            projects = []
         }
     }
     
     private func persistIndex() {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = .prettyPrinted
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        if let data = try? encoder.encode(projects) {
-            try? data.write(to: indexURL, options: .atomic)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            try safeWrite(projects, to: indexURL, encoder: encoder, decoder: decoder)
+        } catch {
+            print("RoomProjectStore 索引寫入失敗: \(error.localizedDescription)")
         }
     }
     
@@ -253,12 +333,10 @@ final class RoomProjectStore: ObservableObject {
         
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let decoder = JSONDecoder()
         do {
-            let roomData = try encoder.encode(capturedRoom)
-            try roomData.write(to: roomURL, options: .atomic)
-            
-            let editData = try encoder.encode(stateToSave)
-            try editData.write(to: editURL, options: .atomic)
+            try safeWrite(capturedRoom, to: roomURL, encoder: encoder, decoder: decoder)
+            try safeWrite(stateToSave, to: editURL, encoder: encoder, decoder: decoder)
         } catch {
             print("RoomProjectStore 存檔失敗: \(error.localizedDescription)")
             return nil
@@ -295,14 +373,14 @@ final class RoomProjectStore: ObservableObject {
     
     func loadCapturedRoom(for project: SavedRoomProject) -> CapturedRoom? {
         let url = storageDirectory.appendingPathComponent(project.roomFileName)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(CapturedRoom.self, from: data)
+        return loadWithBackupFallback(CapturedRoom.self, from: url)
     }
     
     func loadEditState(for project: SavedRoomProject) -> FloorPlanEditState? {
         let url = storageDirectory.appendingPathComponent(project.editStateFileName)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        guard let decoded = try? JSONDecoder().decode(FloorPlanEditState.self, from: data) else { return nil }
+        guard let decoded = loadWithBackupFallback(FloorPlanEditState.self, from: url) else {
+            return nil
+        }
         
         if decoded.schemaVersion < FloorPlanEditState.currentSchemaVersion {
             let legacyBackupName = project.editStateFileName.replacingOccurrences(
@@ -310,7 +388,8 @@ final class RoomProjectStore: ObservableObject {
                 with: ".v\(decoded.schemaVersion).bak.json"
             )
             let legacyBackupURL = storageDirectory.appendingPathComponent(legacyBackupName)
-            if !FileManager.default.fileExists(atPath: legacyBackupURL.path) {
+            if FileManager.default.fileExists(atPath: url.path) &&
+               !FileManager.default.fileExists(atPath: legacyBackupURL.path) {
                 try? FileManager.default.copyItem(at: url, to: legacyBackupURL)
             }
             return FloorPlanEditState.migrateIfNeeded(
@@ -323,10 +402,15 @@ final class RoomProjectStore: ObservableObject {
     }
     
     func deleteProject(_ project: SavedRoomProject) {
+        let fm = FileManager.default
         let roomURL = storageDirectory.appendingPathComponent(project.roomFileName)
         let editURL = storageDirectory.appendingPathComponent(project.editStateFileName)
-        try? FileManager.default.removeItem(at: roomURL)
-        try? FileManager.default.removeItem(at: editURL)
+        let legacyEditURL = storageDirectory.appendingPathComponent(
+            project.editStateFileName.replacingOccurrences(of: ".json", with: ".v1.bak.json")
+        )
+        for target in [roomURL, backupURL(for: roomURL), editURL, backupURL(for: editURL), legacyEditURL] {
+            try? fm.removeItem(at: target)
+        }
         projects.removeAll { $0.id == project.id }
         persistIndex()
     }

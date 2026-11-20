@@ -99,20 +99,6 @@ extension RoomCaptureViewModel {
             print("Error exporting CapturedRoom: \(error.localizedDescription)")
         }
     }
-    
-    func presentShareSheet(with fileURL: URL) {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootViewController = windowScene.windows.first?.rootViewController else {
-            print("Unable to find root view controller.")
-            return
-        }
-        
-        // Create a UIActivityViewController to share the file
-        let activityViewController = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
-        
-        // Present the activity view controller
-        rootViewController.present(activityViewController, animated: true, completion: nil)
-    }
 }
 
 // MARK: RoomCaptureSessionDelegate methods
@@ -166,7 +152,61 @@ private extension RoomCaptureViewModel {
     
     private func handleSuccessfulRoomCapture(_ room: CapturedRoom) {
         self.finalRoom = room
-        // Optionally notify the user that the room capture succeeded
+        
+        // 自動存檔機制：防止掃描完成後進入 2D 畫面崩潰導致資料遺失
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd-HHmm"
+        let timestamp = dateFormatter.string(from: Date())
+        let draftName = "自動儲存草稿-\(timestamp)"
+        
+        if let project = RoomProjectStore.shared.saveProject(
+            capturedRoom: room,
+            editState: nil,
+            projectID: nil,
+            name: draftName,
+            floorLabel: "1F",
+            areaPing: 0,
+            areaSqm: 0
+        ) {
+            print("Successfully auto-saved draft: \(project.id)")
+        }
+        
         print("Successfully captured room: \(room)")
+    }
+}
+
+// MARK: - UI Helpers
+private extension RoomCaptureViewModel {
+    func presentShareSheet(with fileURL: URL) {
+        guard let topVC = getTopViewController() else {
+            print("Unable to find top view controller for sharing.")
+            errorMessage = "無法開啟分享選單，請稍後再試。"
+            isShowError = true
+            return
+        }
+        
+        let activityViewController = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        
+        // For iPad support
+        if let popoverController = activityViewController.popoverPresentationController {
+            popoverController.sourceView = topVC.view
+            popoverController.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+            popoverController.permittedArrowDirections = []
+        }
+        
+        topVC.present(activityViewController, animated: true, completion: nil)
+    }
+    
+    func getTopViewController() -> UIViewController? {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first else {
+            return nil
+        }
+        
+        var topController = window.rootViewController
+        while let presented = topController?.presentedViewController {
+            topController = presented
+        }
+        return topController
     }
 }

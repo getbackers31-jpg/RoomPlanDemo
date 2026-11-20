@@ -298,17 +298,19 @@ extension FloorPlanScene {
             rawPoints.append(p2)
         }
         
-        let areaPt2 = computePolygonAreaPt2(from: segments)
-        let scaleSq = Double(DrawParameters.scalingFactor * DrawParameters.scalingFactor)
-        let sqm = areaPt2 / scaleSq
-        let ping = sqm * 0.3025
-        
-        DispatchQueue.main.async { [weak self] in
-            self?.viewModel.roomAreaSqm = sqm
-            self?.viewModel.roomAreaPing = ping
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let areaPt2 = self.computePolygonAreaPt2(from: segments)
+            let scaleSq = Double(DrawParameters.scalingFactor * DrawParameters.scalingFactor)
+            let sqm = areaPt2 / scaleSq
+            let ping = sqm * 0.3025
+            
+            DispatchQueue.main.async {
+                self.viewModel.roomAreaSqm = sqm
+                self.viewModel.roomAreaPing = ping
+                self.drawExteriorDimensionLines(points: rawPoints)
+            }
         }
-        
-        drawExteriorDimensionLines(points: rawPoints)
     }
     
     private func computePolygonAreaPt2(from segments: [(CGPoint, CGPoint)]) -> Double {
@@ -348,15 +350,19 @@ extension FloorPlanScene {
         func edgeKey(_ u: Int, _ v: Int) -> Int { u * 10000 + v }
         
         var bestCycleArea: Double = 0.0
+        var totalLoops = 0
         for (u, neighbors) in adjacency {
             for v in neighbors {
+                if totalLoops > 2000 { break }
+                totalLoops += 1
+                
                 if visitedDirectedEdges.contains(edgeKey(u, v)) { continue }
                 var path: [Int] = [u]
                 var currU = u
                 var currV = v
                 var steps = 0
                 
-                while steps < 64 {
+                while steps < 100 {
                     visitedDirectedEdges.insert(edgeKey(currU, currV))
                     if currV == u {
                         if path.count >= 3 {

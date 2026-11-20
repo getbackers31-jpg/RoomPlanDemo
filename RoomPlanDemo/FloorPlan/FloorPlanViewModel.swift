@@ -460,4 +460,28 @@ final class FloorPlanViewModel: ObservableObject {
     var editStateCreatedAt: String? = nil
     var displayUnit: DisplayUnit = .centimeter
     var calibrationState: SavedCalibrationState? = nil
+    
+    // Commit 3 (v0.3.0-beta.1)：未存檔狀態管理
+    @Published var isDirty: Bool = false
+    @Published var shouldDismissAfterSave: Bool = false
+    @Published var didCompleteSaveForDismiss: Bool = false
+    
+    func markDirty(reason: String) {
+        DispatchQueue.main.async {
+            if !self.isDirty {
+                self.isDirty = true
+            }
+            print("[DirtyState] marked dirty: \(reason)")
+        }
+    }
+    
+    func clearDirty() {
+        DispatchQueue.main.async {
+            self.isDirty = false
+        }
+    }
+}
+
+extension Notification.Name {
+    static let floorPlanModelDidMutate = Notification.Name("floorPlanModelDidMutate")
 }

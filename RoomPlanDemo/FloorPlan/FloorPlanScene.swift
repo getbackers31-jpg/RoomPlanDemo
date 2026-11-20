@@ -223,8 +223,14 @@ extension FloorPlanScene {
                 if self?.viewModel.editStateCreatedAt == nil {
                     self?.viewModel.editStateCreatedAt = editState.createdAt
                 }
+                self?.viewModel.clearDirty()
                 self?.viewModel.statusToastMessage = "已儲存「\(project.name)」至空間紀錄庫！"
+                if self?.viewModel.shouldDismissAfterSave == true {
+                    self?.viewModel.shouldDismissAfterSave = false
+                    self?.viewModel.didCompleteSaveForDismiss = true
+                }
             } else {
+                self?.viewModel.shouldDismissAfterSave = false
                 self?.viewModel.statusToastMessage = "儲存失敗，請稍後再試"
             }
         }
@@ -539,6 +545,7 @@ extension FloorPlanScene {
     
     func rotateView90() {
         pushUndoState()
+        viewModel.markDirty(reason: "rotate_90")
         rotateAllNodes(by: -.pi / 2)
         camera?.zRotation = 0
         recalculateAreaAndExteriorDimensions()
@@ -688,6 +695,7 @@ extension FloorPlanScene {
     func performUndo() {
         guard let previous = undoStack.popLast() else { return }
         redoStack.append(captureSnapshot())
+        viewModel.markDirty(reason: "undo")
         restoreSnapshot(previous)
         syncUndoRedoFlags()
         viewModel.statusToastMessage = "已復原上一步"
@@ -696,6 +704,7 @@ extension FloorPlanScene {
     func performRedo() {
         guard let next = redoStack.popLast() else { return }
         undoStack.append(captureSnapshot())
+        viewModel.markDirty(reason: "redo")
         restoreSnapshot(next)
         syncUndoRedoFlags()
         viewModel.statusToastMessage = "已重做操作"
@@ -709,7 +718,7 @@ extension FloorPlanScene {
         let wallNodes = surfaceNodes.filter { $0.capturedSurface.category == .wall }
         guard let primaryWall = wallNodes.max(by: { $0.halfLength < $1.halfLength }) else { return }
         
-        if recordUndo { pushUndoState() }
+        if recordUndo { pushUndoState(); viewModel.markDirty(reason: "orthogonalize") }
         
         let baseAngle = primaryWall.zRotation
         rotateAllNodes(by: -baseAngle)
@@ -739,6 +748,7 @@ extension FloorPlanScene {
     }
     
     func calibrateWholeRoom(by ratio: CGFloat) {
+        viewModel.markDirty(reason: "calibrate_whole_room")
         guard ratio > 0.1 && ratio < 10.0 else { return }
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
@@ -835,6 +845,7 @@ private extension FloorPlanScene {
                 pushUndoState()
             case .changed:
                 selectedObject.position = locationInScene
+                viewModel.markDirty(reason: "move_object")
             case .ended, .cancelled:
                 isDraggingObject = false
             default:
@@ -844,7 +855,7 @@ private extension FloorPlanScene {
         }
         
         if let annotationNode = viewModel.selectedAnnotation, annotationNode.contains(locationInScene) {
-            if sender.state == .changed { annotationNode.position = locationInScene }
+            if sender.state == .changed { annotationNode.position = locationInScene; viewModel.markDirty(reason: "move_annotation") }
             return
         }
         
@@ -923,6 +934,7 @@ extension FloorPlanScene {
         newFloorPlanObject.isHidden = !viewModel.showFurniture
         newFloorPlanObject.setLabelVisible(viewModel.showFurnitureLabels)
         addChild(newFloorPlanObject)
+        viewModel.markDirty(reason: "add_object")
     }
     
     func addExampleAnnotations() {
@@ -930,6 +942,7 @@ extension FloorPlanScene {
         let annotation = FloorPlanAnnotation(title: "區域標註", subtitle: "點擊編輯文字", fontSize: 36, fontColor: AppTheme.windowStroke)
         annotation.position = camera.position
         addChild(annotation)
+        viewModel.markDirty(reason: "add_annotation")
     }
     
     func exportImage(with format: ImageFormat) {

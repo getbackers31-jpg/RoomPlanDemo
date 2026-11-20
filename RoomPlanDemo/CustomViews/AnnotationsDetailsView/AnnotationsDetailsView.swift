@@ -189,7 +189,7 @@ private extension AnnotationsDetailsView {
     func action(for type: DetailsType) {
         switch type {
         case .delete:
-            selectedAnnotation?.removeFromParent()
+            selectedAnnotation?.removeFromParent(); NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_annotation")
             selectedAnnotation = nil
         case .rotate:
             // Increment the angle by 15 degrees

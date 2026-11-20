@@ -133,7 +133,7 @@ private extension SurfaceDetailsView {
             case .delete:
                 Button {
                     withAnimation {
-                        surface.removeFromParent()
+                        surface.removeFromParent(); NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_surface")
                         selectedType = nil
                         surface.deselect()
                         self.surface = nil
@@ -232,7 +232,7 @@ private extension SurfaceDetailsView {
                     Spacer()
                     Picker("開門方向", selection: Binding(
                         get: { selectedDirection },
-                        set: { newValue in surface?.updateDoorOpenDirection(to: newValue); selectedDirection = newValue }
+                        set: { newValue in surface?.updateDoorOpenDirection(to: newValue); selectedDirection = newValue; NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "door_open_direction") }
                     )) {
                         ForEach(OpenDirection.allCases, id: \.self) { direction in
                             Text(direction.description).tag(direction)

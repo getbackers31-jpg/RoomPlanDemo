@@ -101,7 +101,7 @@ private extension ObjectDetailsView {
             case .delete:
                 Button {
                     withAnimation {
-                        object.removeFromParent()
+                        object.removeFromParent(); NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_object")
                         selectedType = nil
                         object.deselect()
                         self.object = nil

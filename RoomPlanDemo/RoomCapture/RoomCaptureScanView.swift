@@ -16,6 +16,7 @@ struct RoomCaptureScanView: View {
     @State private var savedRoomLoadFailed: Bool = false
     @State private var showThermalWarning: Bool = false
     @State private var showCancelScanConfirm: Bool = false
+    @State private var showUnsavedChangesAlert: Bool = false
     
     private let isDemo: Bool
     private let savedProject: SavedRoomProject?
@@ -81,6 +82,29 @@ struct RoomCaptureScanView: View {
             }
         } message: {
             Text("目前掃描中的空間進度尚未儲存，返回首頁將會清空。")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .floorPlanModelDidMutate)) { note in
+            let reason = (note.object as? String) ?? "detail_panel_edit"
+            floorPlanViewModel.markDirty(reason: reason)
+        }
+        .onChange(of: floorPlanViewModel.didCompleteSaveForDismiss) { done in
+            if done {
+                floorPlanViewModel.didCompleteSaveForDismiss = false
+                dismiss()
+            }
+        }
+        .alert("尚有未儲存的修改", isPresented: $showUnsavedChangesAlert) {
+            Button("儲存並離開") {
+                floorPlanViewModel.shouldDismissAfterSave = true
+                floorPlanViewModel.shouldSaveProject = true
+            }
+            Button("放棄修改", role: .destructive) {
+                floorPlanViewModel.clearDirty()
+                dismiss()
+            }
+            Button("繼續編輯", role: .cancel) {}
+        } message: {
+            Text("離開後未儲存的編輯將會遺失，重新開啟時會恢復為上次存檔狀態。")
         }
         .toolbar(isDisplayingBlueprint ? .hidden : .visible, for: .navigationBar)
         .onAppear {
@@ -206,7 +230,11 @@ private extension RoomCaptureScanView {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Button {
-                    dismiss()
+                    if floorPlanViewModel.isDirty && !isDemo {
+                        showUnsavedChangesAlert = true
+                    } else {
+                        dismiss()
+                    }
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 15, weight: .bold))

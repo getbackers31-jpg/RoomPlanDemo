@@ -17,6 +17,10 @@ struct RoomCaptureScanView: View {
     @State private var showCancelScanConfirm: Bool = false
     @State private var showUnsavedChangesAlert: Bool = false
     @State private var hasInitializedAppearance: Bool = false
+    @State private var floorPlanScene: FloorPlanScene?
+    @State private var previewEditState: FloorPlanEditState?
+    @State private var previewCapturedRoom: CapturedRoom?
+    @State private var isShowing3DPreview = false
     
     private let isDemo: Bool
     private let savedProject: SavedRoomProject?
@@ -181,6 +185,27 @@ struct RoomCaptureScanView: View {
             .interactiveDismissDisabled()
             .ignoresSafeArea()
         })
+        .sheet(isPresented: $isShowing3DPreview) {
+            NavigationStack {
+                if let previewEditState, let previewCapturedRoom {
+                    FloorPlan3DPreviewView(
+                        capturedRoom: previewCapturedRoom,
+                        editState: previewEditState
+                    )
+                    .navigationTitle("3D 預覽")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("完成") {
+                                isShowing3DPreview = false
+                            }
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         .alert("錯誤", isPresented: $viewModel.isShowError, actions: {
             Button("確定", role: .cancel) {}
         }, message: {
@@ -288,6 +313,24 @@ private extension RoomCaptureScanView {
                 
                 Spacer()
                 
+                Button {
+                    guard let floorPlanScene else { return }
+                    previewEditState = floorPlanScene.exportEditState()
+                    previewCapturedRoom = floorPlanScene.capturedRoom
+                    isShowing3DPreview = true
+                } label: {
+                    Label("3D 預覽", systemImage: "cube")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                        .fixedSize()
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(AppTheme.accentBlue)
+                        .clipShape(Capsule())
+                }
+                .disabled(floorPlanScene == nil)
+
                 Button {
                     floorPlanViewModel.shouldSaveProject = true
                 } label: {
@@ -478,7 +521,11 @@ private extension RoomCaptureScanView {
     var mainRoomView: some View {
         if savedProject != nil {
             if let room = loadedSavedRoom {
-                FloorPlanSceneView(capturedRoom: room, viewModel: floorPlanViewModel)
+                FloorPlanSceneView(
+                    capturedRoom: room,
+                    viewModel: floorPlanViewModel,
+                    floorPlanScene: $floorPlanScene
+                )
                     .ignoresSafeArea()
             } else if savedRoomLoadFailed {
                 VStack(spacing: 14) {
@@ -500,13 +547,21 @@ private extension RoomCaptureScanView {
             }
         } else if isDemo {
             if let finalRoom = mockDataManager.loadCapturedRoom() {
-                FloorPlanSceneView(capturedRoom: finalRoom, viewModel: floorPlanViewModel)
+                FloorPlanSceneView(
+                    capturedRoom: finalRoom,
+                    viewModel: floorPlanViewModel,
+                    floorPlanScene: $floorPlanScene
+                )
                     .ignoresSafeArea()
             }
         } else {
             if viewModel.isShowingFloorPlan,
                let finalRoom = viewModel.getFinalRoom() {
-                FloorPlanSceneView(capturedRoom: finalRoom, viewModel: floorPlanViewModel)
+                FloorPlanSceneView(
+                    capturedRoom: finalRoom,
+                    viewModel: floorPlanViewModel,
+                    floorPlanScene: $floorPlanScene
+                )
                     .ignoresSafeArea()
             } else {
                 RoomCaptureRepresentable(roomCaptureView: viewModel.roomCaptureView)

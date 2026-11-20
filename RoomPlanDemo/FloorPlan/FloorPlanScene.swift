@@ -31,7 +31,7 @@ final class FloorPlanScene: SKScene {
     
     private let surfaces: [CapturedRoom.Surface]
     private let objects: [CapturedRoom.Object]
-    private let capturedRoom: CapturedRoom
+    let capturedRoom: CapturedRoom
     
     private var gridNode: SKNode?
     private var exteriorDimensionsNode: SKNode?

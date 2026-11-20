@@ -5,13 +5,16 @@ import RoomPlan
 struct FloorPlanSceneView: View {
     private let capturedRoom: CapturedRoom
     @ObservedObject var viewModel: FloorPlanViewModel
-    @State private var floorPlanScene: FloorPlanScene?
-    @State private var previewEditState: FloorPlanEditState?
-    @State private var isShowing3DPreview = false
+    @Binding var floorPlanScene: FloorPlanScene?
     
-    init(capturedRoom: CapturedRoom, viewModel: FloorPlanViewModel) {
+    init(
+        capturedRoom: CapturedRoom,
+        viewModel: FloorPlanViewModel,
+        floorPlanScene: Binding<FloorPlanScene?>
+    ) {
         self.capturedRoom = capturedRoom
         self.viewModel = viewModel
+        self._floorPlanScene = floorPlanScene
     }
     
     var body: some View {
@@ -22,44 +25,6 @@ struct FloorPlanSceneView: View {
                 floorPlanScene = scene
             }
         )
-        .overlay(alignment: .topTrailing) {
-            Button {
-                guard let floorPlanScene else { return }
-                previewEditState = floorPlanScene.exportEditState()
-                isShowing3DPreview = true
-            } label: {
-                Label("3D 預覽", systemImage: "cube")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(.black.opacity(0.72), in: Capsule())
-            }
-            .disabled(floorPlanScene == nil)
-            .padding(.top, 64)
-            .padding(.trailing, 16)
-        }
-        .sheet(isPresented: $isShowing3DPreview) {
-            NavigationStack {
-                if let previewEditState {
-                    FloorPlan3DPreviewView(
-                        capturedRoom: capturedRoom,
-                        editState: previewEditState
-                    )
-                    .navigationTitle("3D 預覽")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("完成") {
-                                isShowing3DPreview = false
-                            }
-                        }
-                    }
-                }
-            }
-            .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
-        }
     }
 }
 

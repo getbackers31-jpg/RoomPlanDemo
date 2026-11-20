@@ -17,6 +17,7 @@ struct RoomCaptureScanView: View {
     @State private var showThermalWarning: Bool = false
     @State private var showCancelScanConfirm: Bool = false
     @State private var showUnsavedChangesAlert: Bool = false
+    @State private var hasInitializedAppearance: Bool = false
     
     private let isDemo: Bool
     private let savedProject: SavedRoomProject?
@@ -108,6 +109,8 @@ struct RoomCaptureScanView: View {
         }
         .toolbar(isDisplayingBlueprint ? .hidden : .visible, for: .navigationBar)
         .onAppear {
+            guard !hasInitializedAppearance else { return }
+            hasInitializedAppearance = true
             if let project = savedProject {
                 floorPlanViewModel.savedProjectID = project.id
                 floorPlanViewModel.loadWallLockPreference(for: project.id)
@@ -130,13 +133,19 @@ struct RoomCaptureScanView: View {
             TextField("空間名稱（如：客廳、主臥室）", text: $draftUsage)
             TextField("樓層（如：1F、2F）", text: $draftFloor)
             Button("儲存") {
+                var didChangeMeta = false
                 let trimmedName = draftUsage.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedName.isEmpty {
+                if !trimmedName.isEmpty && trimmedName != floorPlanViewModel.roomUsage {
                     floorPlanViewModel.roomUsage = trimmedName
+                    didChangeMeta = true
                 }
                 let trimmedFloor = draftFloor.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedFloor.isEmpty {
+                if !trimmedFloor.isEmpty && trimmedFloor != floorPlanViewModel.floorLabel {
                     floorPlanViewModel.floorLabel = trimmedFloor
+                    didChangeMeta = true
+                }
+                if didChangeMeta {
+                    floorPlanViewModel.markDirty(reason: "edit_room_info")
                 }
             }
             Button("取消", role: .cancel) {}

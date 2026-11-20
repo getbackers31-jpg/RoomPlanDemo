@@ -242,7 +242,7 @@ final class RoomProjectStore: ObservableObject {
         let verifyData = try Data(contentsOf: tmpURL)
         _ = try decoder.decode(T.self, from: verifyData)
         
-        // 3. 現有原檔先複製成 .bak.json（僅保留上一版）
+        // 3. 驗證通過後，先將現有原檔複製成 .bak.json（僅保留上一版，原檔暫留至替換完成）
         if fm.fileExists(atPath: destinationURL.path) {
             if fm.fileExists(atPath: bakTmpURL.path) {
                 try? fm.removeItem(at: bakTmpURL)
@@ -479,18 +479,34 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var isWallLocked: Bool = false
     
     func setWallLocked(_ locked: Bool) {
-        if isWallLocked == locked { return }
-        isWallLocked = locked
-        if let pid = savedProjectID {
-            UserDefaults.standard.set(locked, forKey: "wall_locked_\(pid.uuidString)")
+        let applyUpdate = {
+            if self.isWallLocked == locked { return }
+            self.isWallLocked = locked
+            if let pid = self.savedProjectID {
+                UserDefaults.standard.set(locked, forKey: "wall_locked_\(pid.uuidString)")
+            }
+        }
+        if Thread.isMainThread {
+            applyUpdate()
+        } else {
+            DispatchQueue.main.async(execute: applyUpdate)
         }
     }
     
     func loadWallLockPreference(for projectID: UUID?) {
         guard let pid = projectID else { return }
         let key = "wall_locked_\(pid.uuidString)"
-        if UserDefaults.standard.object(forKey: key) != nil {
-            isWallLocked = UserDefaults.standard.bool(forKey: key)
+        let applyLoad = {
+            if UserDefaults.standard.object(forKey: key) != nil {
+                self.isWallLocked = UserDefaults.standard.bool(forKey: key)
+            } else {
+                self.isWallLocked = false
+            }
+        }
+        if Thread.isMainThread {
+            applyLoad()
+        } else {
+            DispatchQueue.main.async(execute: applyLoad)
         }
     }
     

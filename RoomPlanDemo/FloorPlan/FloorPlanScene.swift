@@ -760,13 +760,13 @@ extension FloorPlanScene {
             viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再執行全域校準"
             return
         }
-        viewModel.markDirty(reason: "calibrate_whole_room")
         guard ratio > 0.1 && ratio < 10.0 else { return }
         let surfaceNodes = children.compactMap { $0 as? FloorPlanSurface }
         let objectNodes = children.compactMap { $0 as? FloorPlanObject }
         guard !surfaceNodes.isEmpty else { return }
         
         pushUndoState()
+        viewModel.markDirty(reason: "calibrate_whole_room")
         
         let sumX = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.x }
         let sumY = surfaceNodes.reduce(CGFloat(0)) { $0 + $1.position.y }

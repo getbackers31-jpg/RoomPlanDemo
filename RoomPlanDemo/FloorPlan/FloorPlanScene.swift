@@ -103,20 +103,52 @@ extension FloorPlanScene {
             )
         }
         var objectMap: [String: SavedObjectState] = [:]
+        var manualObjects: [SavedManualObjectState] = []
         for obj in children.compactMap({ $0 as? FloorPlanObject }) {
-            let key = obj.capturedObject.identifier.uuidString
-            objectMap[key] = SavedObjectState(
-                x: Double(obj.position.x),
-                y: Double(obj.position.y),
-                zRotation: Double(obj.zRotation),
-                xScale: Double(obj.xScale),
-                yScale: Double(obj.yScale)
-            )
+            if obj.name == "manual_object",
+               let catData = obj.userData?["manualCategoryData"] as? Data {
+                manualObjects.append(SavedManualObjectState(
+                    categoryData: catData,
+                    x: Double(obj.position.x),
+                    y: Double(obj.position.y),
+                    zRotation: Double(obj.zRotation),
+                    xScale: Double(obj.xScale),
+                    yScale: Double(obj.yScale)
+                ))
+            } else {
+                let key = obj.capturedObject.identifier.uuidString
+                objectMap[key] = SavedObjectState(
+                    x: Double(obj.position.x),
+                    y: Double(obj.position.y),
+                    zRotation: Double(obj.zRotation),
+                    xScale: Double(obj.xScale),
+                    yScale: Double(obj.yScale)
+                )
+            }
+        }
+        var savedAnnotations: [SavedAnnotationState] = []
+        for note in children.compactMap({ $0 as? FloorPlanAnnotation }) {
+            var r: CGFloat = 0.0, g: CGFloat = 0.45, b: CGFloat = 0.85, a: CGFloat = 1.0
+            note.titleLabel.fontColor?.getRed(&r, green: &g, blue: &b, alpha: &a)
+            savedAnnotations.append(SavedAnnotationState(
+                title: note.titleLabel.text ?? "",
+                subtitle: note.subtitleLabel.text ?? "",
+                x: Double(note.position.x),
+                y: Double(note.position.y),
+                zRotation: Double(note.zRotation),
+                fontSize: Double(note.titleLabel.fontSize),
+                red: Double(r),
+                green: Double(g),
+                blue: Double(b),
+                alpha: Double(a)
+            ))
         }
         return FloorPlanEditState(
             surfaces: surfaceMap,
             objects: objectMap,
-            cameraRotation: Double(camera?.zRotation ?? 0)
+            cameraRotation: Double(camera?.zRotation ?? 0),
+            manualObjects: manualObjects,
+            annotations: savedAnnotations
         )
     }
     
@@ -141,6 +173,31 @@ extension FloorPlanScene {
             }
         }
         camera?.zRotation = CGFloat(state.cameraRotation)
+        if let manualObjects = state.manualObjects, let firstObject = objects.first {
+            for m in manualObjects {
+                if let cat = try? JSONDecoder().decode(CapturedRoom.Object.Category.self, from: m.categoryData) {
+                    let obj = FloorPlanObject(capturedObject: firstObject, withCategory: cat, objectPosition: CGPoint(x: m.x, y: m.y))
+                    obj.name = "manual_object"
+                    obj.userData = NSMutableDictionary(dictionary: ["manualCategoryData": m.categoryData])
+                    obj.zRotation = CGFloat(m.zRotation)
+                    obj.xScale = CGFloat(m.xScale)
+                    obj.yScale = CGFloat(m.yScale)
+                    obj.isHidden = !viewModel.showFurniture
+                    obj.setLabelVisible(viewModel.showFurnitureLabels)
+                    obj.updateSizeLabel()
+                    addChild(obj)
+                }
+            }
+        }
+        if let savedNotes = state.annotations {
+            for n in savedNotes {
+                let color = UIColor(red: CGFloat(n.red), green: CGFloat(n.green), blue: CGFloat(n.blue), alpha: CGFloat(n.alpha))
+                let note = FloorPlanAnnotation(title: n.title, subtitle: n.subtitle, fontSize: CGFloat(n.fontSize), fontColor: color)
+                note.position = CGPoint(x: n.x, y: n.y)
+                note.zRotation = CGFloat(n.zRotation)
+                addChild(note)
+            }
+        }
     }
     
     func saveCurrentProject() {
@@ -850,6 +907,10 @@ extension FloorPlanScene {
             return
         }
         let newFloorPlanObject = FloorPlanObject(capturedObject: firstObject, withCategory: category, objectPosition: camera.position)
+        newFloorPlanObject.name = "manual_object"
+        if let data = try? JSONEncoder().encode(category) {
+            newFloorPlanObject.userData = NSMutableDictionary(dictionary: ["manualCategoryData": data])
+        }
         newFloorPlanObject.isHidden = !viewModel.showFurniture
         newFloorPlanObject.setLabelVisible(viewModel.showFurnitureLabels)
         addChild(newFloorPlanObject)

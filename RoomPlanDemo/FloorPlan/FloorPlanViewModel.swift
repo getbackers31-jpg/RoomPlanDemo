@@ -18,10 +18,34 @@ struct SavedObjectState: Codable {
     let yScale: Double
 }
 
+struct SavedManualObjectState: Codable {
+    let categoryData: Data
+    let x: Double
+    let y: Double
+    let zRotation: Double
+    let xScale: Double
+    let yScale: Double
+}
+
+struct SavedAnnotationState: Codable {
+    let title: String
+    let subtitle: String
+    let x: Double
+    let y: Double
+    let zRotation: Double
+    let fontSize: Double
+    let red: Double
+    let green: Double
+    let blue: Double
+    let alpha: Double
+}
+
 struct FloorPlanEditState: Codable {
     let surfaces: [String: SavedSurfaceState]
     let objects: [String: SavedObjectState]
     let cameraRotation: Double
+    var manualObjects: [SavedManualObjectState]? = nil
+    var annotations: [SavedAnnotationState]? = nil
 }
 
 struct SavedRoomProject: Identifiable, Codable, Equatable {

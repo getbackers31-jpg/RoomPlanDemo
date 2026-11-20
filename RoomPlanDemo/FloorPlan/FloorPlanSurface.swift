@@ -134,7 +134,7 @@ extension FloorPlanSurface {
         }
         
         dimensionLabel?.text = text
-        dimensionContainer?.isHidden = !isDimensionVisible
+        dimensionContainer?.isHidden = !isDimensionVisible || lengthCm < 25.0
         
         if let label = dimensionLabel, let bg = dimensionBg {
             let padX: CGFloat = 8

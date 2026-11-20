@@ -14,6 +14,8 @@ struct RoomCaptureScanView: View {
     @State private var draftFloor: String = "1F"
     @State private var loadedSavedRoom: CapturedRoom? = nil
     @State private var savedRoomLoadFailed: Bool = false
+    @State private var showThermalWarning: Bool = false
+    @State private var showCancelScanConfirm: Bool = false
     
     private let isDemo: Bool
     private let savedProject: SavedRoomProject?
@@ -57,6 +59,29 @@ struct RoomCaptureScanView: View {
                 }
             }
         }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
+            let state = ProcessInfo.processInfo.thermalState
+            if !isDisplayingBlueprint && (state == .serious || state == .critical) {
+                showThermalWarning = true
+            }
+        }
+        .alert("裝置溫度偏高", isPresented: $showThermalWarning) {
+            Button("我知道了", role: .cancel) {}
+        } message: {
+            Text("iPhone 目前發熱較明顯，可能會造成光達掃描漂移或降頻。建議先結束本次掃描並儲存，待降溫後再繼續。")
+        }
+        .alert("確定要放棄本次掃描？", isPresented: $showCancelScanConfirm) {
+            Button("繼續掃描", role: .cancel) {}
+            Button("放棄並返回", role: .destructive) {
+                UIApplication.shared.isIdleTimerDisabled = false
+                dismiss()
+            }
+        } message: {
+            Text("目前掃描中的空間進度尚未儲存，返回首頁將會清空。")
+        }
         .toolbar(isDisplayingBlueprint ? .hidden : .visible, for: .navigationBar)
         .onAppear {
             if let project = savedProject {
@@ -72,6 +97,7 @@ struct RoomCaptureScanView: View {
                     savedRoomLoadFailed = true
                 }
             } else if !isDemo {
+                UIApplication.shared.isIdleTimerDisabled = true
                 viewModel.startSession()
             }
         }
@@ -442,7 +468,13 @@ private extension RoomCaptureScanView {
                     .ignoresSafeArea()
                     .toolbar {
                         ToolbarItem(placement: .topBarLeading) {
-                            Button("取消") { dismiss() }
+                            Button("取消") {
+                                if viewModel.isScanning {
+                                    showCancelScanConfirm = true
+                                } else {
+                                    dismiss()
+                                }
+                            }
                                 .foregroundColor(.white)
                         }
                         ToolbarItem(placement: .topBarTrailing) { scanButtonView }

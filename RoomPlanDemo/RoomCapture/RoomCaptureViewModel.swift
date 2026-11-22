@@ -1,212 +1,219 @@
-//
-//  RoomCaptureViewModel.swift
-//  RoomPlanPDP
-//
-//  Created by Baidetskyi Yurii on 08.01.2025.
-//
-
 import Foundation
-import RoomPlan
+import Combine
+@preconcurrency import RoomPlan
 import UIKit
 
-final class RoomCaptureViewModel: ObservableObject {
-    // The capture view
-    public let roomCaptureView: RoomCaptureView
-    
-    // Capture and room builder configuration
-    private let captureSessionConfig: RoomCaptureSession.Configuration
-    private let roomBuilder: RoomBuilder
-    
-    // The final scan result
-    @Published var finalRoom: CapturedRoom?
-    
-    // Errors
-    @Published var isShowError: Bool = false
-    @Published var errorMessage: String = ""
-    
-    // states
-    @Published var isScanning: Bool = false
-    @Published var isShowingFloorPlan: Bool = false
-    
-    init() {
-        roomCaptureView = RoomCaptureView(frame: .zero)
-        captureSessionConfig = RoomCaptureSession.Configuration()
-        roomBuilder = RoomBuilder(options: [.beautifyObjects])
-        
-        roomCaptureView.captureSession.delegate = self
-    }
+enum RoomCapturePhase: Equatable {
+    case idle, scanning, processing, ready, failed, cancelled
 }
 
-// MARK: Methods
-extension RoomCaptureViewModel {
-    // Start and stop the capture session. Available from our RoomCaptureScanView.
+@MainActor
+final class RoomCaptureViewModel: ObservableObject {
+    @Published private(set) var roomCaptureView: RoomCaptureView
+    @Published private(set) var phase: RoomCapturePhase = .idle
+    @Published private(set) var autoSavedProject: SavedRoomProject?
+    @Published var finalRoom: CapturedRoom?
+    @Published var isShowError = false
+    @Published var errorMessage = ""
+    @Published private(set) var isScanning = false
+    @Published var isShowingFloorPlan = false
+
+    private let captureSessionConfig = RoomCaptureSession.Configuration()
+    private var generation = UUID()
+    private var processingTask: Task<Void, Never>?
+    private var acceptedEnd = false
+
+    init() {
+        roomCaptureView = RoomCaptureView(frame: .zero)
+        roomCaptureView.captureSession.delegate = self
+    }
+
     func startSession() {
+        guard phase != .scanning, phase != .processing else { return }
+        processingTask?.cancel()
+        generation = UUID()
+        acceptedEnd = false
+        // Each run has its own session identity. Late delegate calls from a
+        // previous run cannot be mistaken for this run, even after retry.
+        if phase != .idle {
+            roomCaptureView.captureSession.delegate = nil
+            roomCaptureView = RoomCaptureView(frame: .zero)
+        }
+        roomCaptureView.captureSession.delegate = self
+        finalRoom = nil
+        autoSavedProject = nil
+        isShowingFloorPlan = false
+        errorMessage = ""
+        isShowError = false
+        phase = .scanning
         isScanning = true
-        roomCaptureView.captureSession.run(configuration: captureSessionConfig)
-        
-        // Prevent the screen from sleeping
         UIApplication.shared.isIdleTimerDisabled = true
+        roomCaptureView.captureSession.run(configuration: captureSessionConfig)
     }
-    
+
     func stopSession() {
+        guard phase == .scanning else { return }
+        phase = .processing
         isScanning = false
-        roomCaptureView.captureSession.stop()
-        
-        // Enable the screen to sleep again
         UIApplication.shared.isIdleTimerDisabled = false
+        roomCaptureView.captureSession.stop()
     }
-    
+
+    func cancelSession() {
+        guard phase != .cancelled else { return }
+        let wasRunning = phase == .scanning
+        generation = UUID()
+        processingTask?.cancel()
+        processingTask = nil
+        acceptedEnd = true
+        roomCaptureView.captureSession.delegate = nil
+        phase = .cancelled
+        isScanning = false
+        isShowingFloorPlan = false
+        UIApplication.shared.isIdleTimerDisabled = false
+        if wasRunning { roomCaptureView.captureSession.stop() }
+    }
+
     func handleScanButtonTap() {
-        if isScanning {
+        switch phase {
+        case .idle, .failed, .cancelled:
+            startSession()
+        case .scanning:
             stopSession()
-        } else {
+        case .processing:
+            break
+        case .ready:
+            guard finalRoom != nil else { return }
             isShowingFloorPlan = true
         }
     }
-    
-    func getFinalRoom() -> CapturedRoom? {
-        guard let finalRoom else {
-            isShowError = true
-            errorMessage = "尚未取得空間掃描資料。"
-            return nil }
-        
-        return finalRoom
-    }
-    
+
+    // Pure read: safe to use while SwiftUI evaluates body.
+    func getFinalRoom() -> CapturedRoom? { finalRoom }
+
     func shareCapturedRoom() {
-        guard let finalRoom = finalRoom else {
-            // Show an error if the room has not been captured yet
-            isShowError = true
+        guard phase == .ready, let finalRoom else {
             errorMessage = "目前沒有可匯出的空間掃描資料。"
+            isShowError = true
             return
         }
-        
-        // Define the file URL for the `.usdz` export
-        let tempDirectory = FileManager.default.temporaryDirectory
-        let fileURL = tempDirectory.appendingPathComponent("CapturedRoom.usdz")
-        
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CapturedRoom.usdz")
         do {
-            // Export the captured room to the `.usdz` file
-            try finalRoom.export(to: fileURL)
-            print("CapturedRoom exported to: \(fileURL)")
-            
-            // Present the share sheet
-            presentShareSheet(with: fileURL)
+            try finalRoom.export(to: url)
+            presentShareSheet(with: url)
         } catch {
-            // Handle errors during export
-            isShowError = true
             errorMessage = "匯出 USDZ 3D 模型失敗：\(error.localizedDescription)"
-            print("Error exporting CapturedRoom: \(error.localizedDescription)")
+            isShowError = true
         }
     }
-}
 
-// MARK: RoomCaptureSessionDelegate methods
-extension RoomCaptureViewModel: RoomCaptureSessionDelegate {
-    func captureSession(
-        _ session: RoomCaptureSession,
-        didEndWith data: CapturedRoomData,
-        error: Error?
+    private func receiveEnd(
+        session: RoomCaptureSession, data: CapturedRoomData, error: Error?
     ) {
-        // Step 1: Handle errors
-        if let error = error {
+        guard session === roomCaptureView.captureSession,
+              phase == .scanning || phase == .processing,
+              !acceptedEnd else { return }
+        acceptedEnd = true
+        isScanning = false
+        UIApplication.shared.isIdleTimerDisabled = false
+        if let error {
             handleCaptureError(error)
             return
         }
-        
-        // Step 2: Process the captured data
-        Task { [weak self] in
-            guard let self else { return }
-            
+        phase = .processing
+        let token = generation
+        let builder = RoomBuilder(options: [.beautifyObjects])
+        processingTask = Task { @MainActor [weak self] in
             do {
-                let room = try await roomBuilder.capturedRoom(from: data)
-                
-                // Update the UI or state safely on the main thread
-                await MainActor.run {
-                    self.handleSuccessfulRoomCapture(room)
-                }
+                let room = try await builder.capturedRoom(from: data)
+                guard !Task.isCancelled, let self,
+                      self.generation == token, self.phase == .processing else { return }
+                self.handleSuccessfulRoomCapture(room, token: token)
             } catch {
-                print("Error creating CapturedRoom: \(error.localizedDescription)")
+                guard !Task.isCancelled, let self,
+                      self.generation == token, self.phase == .processing else { return }
                 self.handleRoomProcessingError(error)
             }
         }
     }
-}
 
-// MARK: Private Methods
-private extension RoomCaptureViewModel {
-    // Helper to handle errors
     private func handleCaptureError(_ error: Error) {
-        // For example, show an alert to the user or retry capture
-        isShowError = true
+        guard phase != .cancelled else { return }
+        phase = .failed
+        isScanning = false
         errorMessage = error.localizedDescription
-        print("Capture session error: \(error.localizedDescription)")
-    }
-    
-    private func handleRoomProcessingError(_ error: Error) {
-        // Handle errors from processing the captured data
         isShowError = true
-        errorMessage = error.localizedDescription
-        print("Room processing error: \(error.localizedDescription)")
     }
-    
-    private func handleSuccessfulRoomCapture(_ room: CapturedRoom) {
-        self.finalRoom = room
-        
-        // 自動存檔機制：防止掃描完成後進入 2D 畫面崩潰導致資料遺失
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyyMMdd-HHmm"
-        let timestamp = dateFormatter.string(from: Date())
-        let draftName = "自動儲存草稿-\(timestamp)"
-        
-        if let project = RoomProjectStore.shared.saveProject(
-            existingID: nil,
-            name: draftName,
-            floorLabel: "1F",
-            areaPing: 0,
-            areaSqm: 0,
-            capturedRoom: room,
-            editState: FloorPlanEditState(surfaces: [:], objects: [:], cameraRotation: 0.0)
-        ) {
-            print("Successfully auto-saved draft: \(project.id)")
-        }
-        
-        print("Successfully captured room: \(room)")
-    }
-}
 
-// MARK: - UI Helpers
-private extension RoomCaptureViewModel {
-    func presentShareSheet(with fileURL: URL) {
+    private func handleRoomProcessingError(_ error: Error) {
+        guard phase != .cancelled else { return }
+        phase = .failed
+        isScanning = false
+        errorMessage = error.localizedDescription
+        isShowError = true
+    }
+
+    private func handleSuccessfulRoomCapture(_ room: CapturedRoom, token: UUID) {
+        guard generation == token, phase == .processing else { return }
+        finalRoom = room
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmm"
+        let draftName = "自動儲存草稿-\(formatter.string(from: Date()))"
+        // Synchronous main-actor commit: cancellation cannot interleave between
+        // the generation check and draft creation. Never save in a detached task.
+        autoSavedProject = RoomProjectStore.shared.saveProject(
+            existingID: nil, name: draftName, floorLabel: "1F",
+            areaPing: 0, areaSqm: 0, capturedRoom: room,
+            editState: FloorPlanEditState(surfaces: [:], objects: [:], cameraRotation: 0)
+        )
+        if autoSavedProject == nil {
+            errorMessage = RoomProjectStore.shared.lastErrorMessage
+                ?? "自動儲存草稿失敗，請進入平面圖後手動儲存。"
+            isShowError = true
+        }
+        phase = .ready
+        processingTask = nil
+    }
+
+    private func presentShareSheet(with fileURL: URL) {
         guard let topVC = getTopViewController() else {
-            print("Unable to find top view controller for sharing.")
             errorMessage = "無法開啟分享選單，請稍後再試。"
             isShowError = true
             return
         }
-        
-        let activityViewController = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
-        
-        // For iPad support
-        if let popoverController = activityViewController.popoverPresentationController {
-            popoverController.sourceView = topVC.view
-            popoverController.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
-            popoverController.permittedArrowDirections = []
+        let controller = UIActivityViewController(
+            activityItems: [fileURL], applicationActivities: nil
+        )
+        if let popover = controller.popoverPresentationController {
+            popover.sourceView = topVC.view
+            popover.sourceRect = CGRect(
+                x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0
+            )
+            popover.permittedArrowDirections = []
         }
-        
-        topVC.present(activityViewController, animated: true, completion: nil)
+        topVC.present(controller, animated: true)
     }
-    
-    func getTopViewController() -> UIViewController? {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first else {
-            return nil
+
+    private func getTopViewController() -> UIViewController? {
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }),
+              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first
+        else { return nil }
+        var top = window.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+        return top
+    }
+}
+
+extension RoomCaptureViewModel: RoomCaptureSessionDelegate {
+    nonisolated func captureSession(
+        _ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?
+    ) {
+        // Delegate callbacks are not assumed to run on the main thread.
+        Task { @MainActor [weak self] in
+            self?.receiveEnd(session: session, data: data, error: error)
         }
-        
-        var topController = window.rootViewController
-        while let presented = topController?.presentedViewController {
-            topController = presented
-        }
-        return topController
     }
 }

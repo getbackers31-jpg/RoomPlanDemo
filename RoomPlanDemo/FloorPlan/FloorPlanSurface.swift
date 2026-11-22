@@ -24,8 +24,25 @@ final class FloorPlanSurface: SKNode, Identifiable {
     private var windowGlassShape: SKShapeNode?
     private var structuralMarkerShape: SKShapeNode?
     private(set) var calibrationScaleFactor: CGFloat
-    private let baseDepthInPoints: CGFloat
+    private var baseDepthInPoints: CGFloat
     private var depthInPoints: CGFloat
+    private var customStrokeWidth: CGFloat?
+    private let pointsPerMeter: CGFloat
+
+    // Physical thickness and drawing stroke are intentionally independent.
+    var thicknessMeters: CGFloat {
+        get { depthInPoints / pointsPerMeter }
+        set { updateThicknessMeters(to: newValue) }
+    }
+
+    var isProtectedByWallLock: Bool {
+        capturedSurface.category == .wall || representation == .solidWall
+    }
+
+    private var isEditingLocked: Bool {
+        isProtectedByWallLock &&
+            ((scene as? FloorPlanScene)?.viewModel.isWallLocked ?? false)
+    }
     
     private var dimensionContainer: SKNode?
     private var dimensionLabel: SKLabelNode?
@@ -36,8 +53,8 @@ final class FloorPlanSurface: SKNode, Identifiable {
         didSet {
             if representation == .source,
                capturedSurface.category == .door,
-               (oldValue * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters)
-                    != (halfLength * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters) {
+               (oldValue * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters)
+                    != (halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters) {
                 clearPresentationShapes()
             }
             drawSurface()
@@ -53,22 +70,30 @@ final class FloorPlanSurface: SKNode, Identifiable {
         self.openDirection = geometry.openDirection
         self.representation = geometry.representation
         self.isFloorToCeilingGlass = geometry.isFloorToCeilingGlass
-        self.calibrationScaleFactor = geometry.scaleFactor
-        self.baseDepthInPoints = geometry.depthInMeters / geometry.scaleFactor * geometry.pointsPerMeter
-        self.depthInPoints = geometry.depthInMeters * geometry.pointsPerMeter
-        self.halfLength = geometry.halfLength
-        
-        super.init()
-        
-        self.position = geometry.center
-        self.zRotation = geometry.angle
-        
-        drawSurface()
-        if let strokeWidth = geometry.strokeWidth {
-            updateDepth(to: strokeWidth)
+        let scale = geometry.scaleFactor.isFinite && geometry.scaleFactor > 0
+            ? geometry.scaleFactor : 1
+        let ppm = geometry.pointsPerMeter.isFinite && geometry.pointsPerMeter > 0
+            ? geometry.pointsPerMeter : 200
+        let depth = geometry.depthInMeters.isFinite && geometry.depthInMeters > 0
+            ? geometry.depthInMeters : 0.1
+        self.pointsPerMeter = ppm
+        self.calibrationScaleFactor = scale
+        self.baseDepthInPoints = depth * ppm / scale
+        self.depthInPoints = depth * ppm
+        self.customStrokeWidth = geometry.strokeWidth.flatMap {
+            $0.isFinite && $0 > 0 ? $0 : nil
         }
+        self.halfLength = geometry.halfLength.isFinite && geometry.halfLength >= 0
+            ? geometry.halfLength : 0
+
+        super.init()
+
+        self.position = geometry.center.x.isFinite && geometry.center.y.isFinite
+            ? geometry.center : .zero
+        self.zRotation = geometry.angle.isFinite ? geometry.angle : 0
+        drawSurface()
     }
-    
+
     required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
@@ -78,7 +103,7 @@ extension FloorPlanSurface {
     var effectiveRepresentation: FloorPlanSurfaceRepresentation {
         if representation == .source,
            capturedSurface.category == .door,
-           halfLength * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters {
+           halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters {
             return .wideOpening
         }
         return representation
@@ -86,7 +111,7 @@ extension FloorPlanSurface {
 
     var isOversizedDoor: Bool {
         capturedSurface.category == .door &&
-            halfLength * 2 / DrawParameters.scalingFactor > FloorPlanGeometry.oversizedDoorWidthMeters
+            halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters
     }
 
     var isWallGeometry: Bool {
@@ -102,110 +127,177 @@ extension FloorPlanSurface {
 
     var isNoiseFragment: Bool {
         isWallGeometry &&
-            halfLength * 2 / DrawParameters.scalingFactor < FloorPlanGeometry.minimumWallSegmentLengthMeters
+            halfLength * 2 / pointsPerMeter < FloorPlanGeometry.minimumWallSegmentLengthMeters
     }
 
     var isRoomBoundaryGeometry: Bool {
-        isWallGeometry ||
-            (effectiveRepresentation == .source && capturedSurface.category == .opening)
+        switch effectiveRepresentation {
+        case .solidWall, .wideOpening:
+            return true
+        case .beam, .column:
+            return false
+        case .source:
+            // These are candidate boundary spans, not additional solid walls.
+            // Scene boundary evaluation must still reject invalid topology.
+            switch capturedSurface.category {
+            case .wall, .door, .window, .opening:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     func select() { updateHighlight() }
-    func deselect() { borderNode?.removeFromParent() }
-    
+
+    func deselect() {
+        borderNode?.removeFromParent()
+        borderNode = nil
+    }
+
     func setDimensionVisible(_ visible: Bool) {
         isDimensionVisible = visible
-        dimensionContainer?.isHidden = !visible
+        updateDimensionLabel()
     }
-    
+
     func updateDoorOpenDirection(to newValue: OpenDirection) {
-        self.openDirection = newValue
+        guard !isEditingLocked, openDirection != newValue else { return }
+        (scene as? FloorPlanScene)?.recordUndoState()
+        openDirection = newValue
         drawSurface()
         markDirty(reason: "door_open_direction")
     }
 
+    // Restore methods are for snapshot/load only: no lock, Undo or Dirty events.
     func restoreOpenDirection(to value: OpenDirection) {
         openDirection = value
         drawSurface()
     }
 
     func restoreStrokeWidth(to value: CGFloat?) {
-        guard let value else { return }
-        selectedShape?.lineWidth = value
-        hideWallShape?.lineWidth = value + 2
+        if let value {
+            guard value.isFinite, value > 0 else { return }
+        }
+        customStrokeWidth = value
+        drawSurface()
+    }
+
+    func restoreThicknessMeters(to value: CGFloat) {
+        guard value.isFinite, value > 0 else { return }
+        let points = value * pointsPerMeter
+        let base = points / calibrationScaleFactor
+        guard points.isFinite, base.isFinite, base > 0 else { return }
+        depthInPoints = points
+        baseDepthInPoints = base
+        drawSurface()
     }
 
     func setRepresentation(_ newValue: FloorPlanSurfaceRepresentation) {
-        guard representation != newValue else { return }
+        // Also protect entry INTO solidWall while locked, not only exit from it.
+        let locked = (scene as? FloorPlanScene)?.viewModel.isWallLocked ?? false
+        guard !(locked && (isProtectedByWallLock || newValue == .solidWall)),
+              representation != newValue else { return }
         (scene as? FloorPlanScene)?.recordUndoState()
         representation = newValue
-        (scene as? FloorPlanScene)?.viewModel.markDirty(reason: "surface_representation")
+        markDirty(reason: "surface_representation")
         (scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
 
     func setFloorToCeilingGlass(_ enabled: Bool) {
-        guard isFloorToCeilingGlass != enabled else { return }
+        guard !isEditingLocked, isFloorToCeilingGlass != enabled else { return }
         (scene as? FloorPlanScene)?.recordUndoState()
         isFloorToCeilingGlass = enabled
-        (scene as? FloorPlanScene)?.viewModel.markDirty(reason: "floor_to_ceiling_glass")
+        markDirty(reason: "floor_to_ceiling_glass")
     }
 
     func restoreCalibrationScaleFactor(to value: CGFloat) {
+        guard value.isFinite, value > 0 else { return }
+        let depth = baseDepthInPoints * value
+        guard depth.isFinite, depth > 0 else { return }
         calibrationScaleFactor = value
-        depthInPoints = baseDepthInPoints * value
+        depthInPoints = depth
         drawSurface()
     }
-    
+
+    // Continuous edit entry points: the caller owns begin/endContinuousEdit.
+    // No degree conversion, snapping or per-value Undo insertion occurs here.
     func updateAngleRadians(to newAngle: CGFloat) {
-        self.zRotation = newAngle * (.pi / 180)
+        guard !isEditingLocked, newAngle.isFinite,
+              zRotation != newAngle else { return }
+        zRotation = newAngle
         updateDimensionLabel()
-        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+        if borderNode?.parent != nil { updateHighlight() }
         markDirty(reason: "surface_angle")
+        (scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
-    
+
     func updateAngle(to newAngle: CGFloat) {
-        self.zRotation = newAngle
-        updateDimensionLabel()
-        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
-        markDirty(reason: "surface_angle")
+        updateAngleRadians(to: newAngle)
     }
-    
+
     func updateWidth(to newValue: CGFloat) {
+        guard !isEditingLocked, newValue.isFinite, newValue > 0,
+              newValue != halfLength else { return }
         halfLength = newValue
-        updateHighlight()
-        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
         markDirty(reason: "surface_width")
+        (scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
     }
-    
+
     func updateDepth(to newValue: CGFloat) {
-        selectedShape?.lineWidth = newValue
-        hideWallShape?.lineWidth = newValue + 2
+        guard !isEditingLocked, newValue.isFinite, newValue > 0,
+              customStrokeWidth != newValue else { return }
+        customStrokeWidth = newValue
+        drawSurface()
         markDirty(reason: "surface_stroke_width")
     }
-    
-    func updatePosition(x: Double? = nil, y: Double? = nil, z: Double? = nil) {
-        let currentPosition = self.position
-        let currentZPosition = self.zPosition
-        self.position = CGPoint(x: x ?? currentPosition.x, y: y ?? currentPosition.y)
-        self.zPosition = z ?? currentZPosition
-        (self.scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
-        markDirty(reason: "surface_position")
-    }
-    
-    func applyGlobalScale(ratio: CGFloat, around origin: CGPoint) {
-        calibrationScaleFactor *= ratio
-        depthInPoints = baseDepthInPoints * calibrationScaleFactor
-        self.halfLength *= ratio
-        let dx = self.position.x - origin.x
-        let dy = self.position.y - origin.y
-        self.position = CGPoint(x: origin.x + dx * ratio, y: origin.y + dy * ratio)
-        if borderNode?.parent != nil {
-            updateHighlight()
-        }
+
+    func updateThicknessMeters(to newValue: CGFloat) {
+        guard !isEditingLocked, newValue.isFinite, newValue > 0,
+              newValue != thicknessMeters else { return }
+        let points = newValue * pointsPerMeter
+        let base = points / calibrationScaleFactor
+        guard points.isFinite, base.isFinite, base > 0 else { return }
+        depthInPoints = points
+        baseDepthInPoints = base
         drawSurface()
-        updateDimensionLabel()
+        markDirty(reason: "surface_thickness")
     }
-    
+
+    func updatePosition(x: Double? = nil, y: Double? = nil, z: Double? = nil) {
+        guard !isEditingLocked else { return }
+        let nextX = x.map { CGFloat($0) } ?? position.x
+        let nextY = y.map { CGFloat($0) } ?? position.y
+        let nextZ = z.map { CGFloat($0) } ?? zPosition
+        guard nextX.isFinite, nextY.isFinite, nextZ.isFinite,
+              nextX != position.x || nextY != position.y || nextZ != zPosition else { return }
+        position = CGPoint(x: nextX, y: nextY)
+        zPosition = nextZ
+        markDirty(reason: "surface_position")
+        (scene as? FloorPlanScene)?.recalculateAreaAndExteriorDimensions()
+    }
+
+    // The Scene owns the single Undo/Dirty transaction for global calibration.
+    func applyGlobalScale(ratio: CGFloat, around origin: CGPoint) {
+        guard !isEditingLocked, ratio.isFinite, ratio > 0,
+              origin.x.isFinite, origin.y.isFinite else { return }
+        let scale = calibrationScaleFactor * ratio
+        let depth = baseDepthInPoints * scale
+        let length = halfLength * ratio
+        let point = CGPoint(
+            x: origin.x + (position.x - origin.x) * ratio,
+            y: origin.y + (position.y - origin.y) * ratio
+        )
+        guard scale.isFinite, scale > 0, depth.isFinite, depth > 0,
+              length.isFinite, length >= 0,
+              point.x.isFinite, point.y.isFinite else { return }
+        calibrationScaleFactor = scale
+        depthInPoints = depth
+        position = point
+        halfLength = length
+        // Stroke is a drawing preference and deliberately does not scale.
+        drawSurface()
+    }
+
     func updateDimensionLabel() {
         guard isWallGeometry else {
             dimensionContainer?.removeFromParent()
@@ -215,7 +307,7 @@ extension FloorPlanSurface {
             return
         }
         
-        let lengthCm = Double(halfLength * 2 / DrawParameters.scalingFactor) * 100.0
+        let lengthCm = Double(halfLength * 2 / pointsPerMeter) * 100.0
         let text = String(format: "%.0f cm", lengthCm)
         
         if dimensionLabel == nil {
@@ -279,10 +371,11 @@ private extension FloorPlanSurface {
     }
 
     func drawSurface() {
+        let wasSelected = borderNode?.parent != nil
+        clearPresentationShapes()
         switch effectiveRepresentation {
         case .solidWall:
             drawWall()
-            updateDimensionLabel()
         case .wideOpening:
             drawWideOpening()
         case .beam, .column:
@@ -290,6 +383,13 @@ private extension FloorPlanSurface {
         case .source:
             drawSourceSurface()
         }
+        if let width = customStrokeWidth {
+            let target = selectedShape ?? structuralMarkerShape
+            target?.lineWidth = width
+            hideWallShape?.lineWidth = width + 2
+        }
+        updateDimensionLabel()
+        if wasSelected { updateHighlight() }
     }
 
     func drawSourceSurface() {
@@ -554,3 +654,4 @@ private extension FloorPlanSurface {
         return CGRect(x: -width / 2, y: -2.5, width: width, height: 5.0)
     }
 }
+

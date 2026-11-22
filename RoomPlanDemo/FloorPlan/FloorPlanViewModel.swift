@@ -1,9 +1,72 @@
 import Foundation
+import Combine
+import CoreGraphics
+import CryptoKit
 import RoomPlan
 
 // MARK: - 第二階段：本機空間紀錄庫資料模型與存檔管理器
 
-struct SavedSurfaceState: Codable {
+enum FloorPlanCoordinateConvention: String, Codable, Equatable {
+    case legacyEulerXZ
+    case basisXZ
+}
+
+enum FloorPlanBoundaryStatus: String, Codable, Equatable {
+    case empty
+    case closed
+    case open
+    case selfIntersecting
+    case ambiguous
+}
+
+struct FloorPlanBoundaryResult: Equatable {
+    let status: FloorPlanBoundaryStatus
+    let areaSquareMeters: Double?
+
+    init(
+        status: FloorPlanBoundaryStatus,
+        areaSquareMeters: Double? = nil
+    ) {
+        if status == .closed,
+           let areaSquareMeters,
+           areaSquareMeters.isFinite,
+           areaSquareMeters > 0 {
+            self.status = .closed
+            self.areaSquareMeters = areaSquareMeters
+        } else {
+            self.status = status == .closed ? .ambiguous : status
+            self.areaSquareMeters = nil
+        }
+    }
+}
+
+enum FloorPlanPersistenceError: LocalizedError {
+    case unsupportedSchema(Int)
+    case invalidState(String)
+    case invalidFileName
+    case unavailableDocumentsDirectory
+    case indexUnavailable
+    case mainThreadRequired
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedSchema(let version):
+            return "此存檔使用較新的資料格式（版本 \(version)），目前版本無法安全開啟或覆寫。"
+        case .invalidState(let detail):
+            return "空間資料驗證失敗：\(detail)"
+        case .invalidFileName:
+            return "存檔檔名無效，已停止讀寫。"
+        case .unavailableDocumentsDirectory:
+            return "無法取得本機文件資料夾。"
+        case .indexUnavailable:
+            return "空間紀錄庫索引及備份無法讀取，已停止寫入以保護既有資料。"
+        case .mainThreadRequired:
+            return "此資料操作必須由主執行緒執行。"
+        }
+    }
+}
+
+struct SavedSurfaceState: Codable, Equatable {
     let x: Double
     let y: Double
     let zRotation: Double
@@ -12,9 +75,10 @@ struct SavedSurfaceState: Codable {
     var isFloorToCeilingGlass: Bool? = nil
     var openDirection: OpenDirection? = nil
     var strokeWidth: Double? = nil
+    var thicknessMeters: Double? = nil
 }
 
-struct SavedObjectState: Codable {
+struct SavedObjectState: Codable, Equatable {
     let x: Double
     let y: Double
     let zRotation: Double
@@ -22,16 +86,17 @@ struct SavedObjectState: Codable {
     let yScale: Double
 }
 
-struct SavedManualObjectState: Codable {
+struct SavedManualObjectState: Codable, Equatable {
     let categoryData: Data
     let x: Double
     let y: Double
     let zRotation: Double
     let xScale: Double
     let yScale: Double
+    var id: UUID? = nil
 }
 
-struct SavedAnnotationState: Codable {
+struct SavedAnnotationState: Codable, Equatable {
     let title: String
     let subtitle: String
     let x: Double
@@ -42,6 +107,7 @@ struct SavedAnnotationState: Codable {
     let green: Double
     let blue: Double
     let alpha: Double
+    var id: UUID? = nil
 }
 
 enum DisplayUnit: String, Codable, Equatable {
@@ -56,11 +122,11 @@ enum EditStateDateFormatter {
         formatter.formatOptions = [.withInternetDateTime]
         return formatter
     }
-    
+
     static func string(from date: Date) -> String {
         makeFormatter().string(from: date)
     }
-    
+
     static func nowString() -> String {
         string(from: Date())
     }
@@ -73,32 +139,51 @@ struct SavedCalibrationState: Codable, Equatable {
     let calibratedAt: String
 }
 
-struct FloorPlanCalibrationRequest {
+struct FloorPlanCalibrationRequest: Equatable {
     let ratio: CGFloat
     let referenceOriginalMeters: Double
     let referenceMeasuredMeters: Double
+    let id: UUID
+
+    init(
+        ratio: CGFloat,
+        referenceOriginalMeters: Double,
+        referenceMeasuredMeters: Double,
+        id: UUID = UUID()
+    ) {
+        self.ratio = ratio
+        self.referenceOriginalMeters = referenceOriginalMeters
+        self.referenceMeasuredMeters = referenceMeasuredMeters
+        self.id = id
+    }
 }
 
-struct FloorPlanEditState: Codable {
-    static let currentSchemaVersion: Int = 3
-    
+struct FloorPlanEditState: Codable, Equatable {
+    static let currentSchemaVersion: Int = 4
+
     static var currentAppVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"]
+            as? String ?? "0.3.0"
     }
-    
+
     var schemaVersion: Int
     var appVersion: String
     var createdAt: String
     var modifiedAt: String
     var displayUnit: DisplayUnit
     var calibration: SavedCalibrationState?
-    
-    let surfaces: [String: SavedSurfaceState]
-    let objects: [String: SavedObjectState]
-    let cameraRotation: Double
-    var manualObjects: [SavedManualObjectState]? = nil
-    var annotations: [SavedAnnotationState]? = nil
-    
+
+    var surfaces: [String: SavedSurfaceState]
+    var objects: [String: SavedObjectState]
+    var cameraRotation: Double
+    var manualObjects: [SavedManualObjectState]?
+    var annotations: [SavedAnnotationState]?
+
+    var coordinateConvention: FloorPlanCoordinateConvention
+    var deletedSurfaceIDs: Set<String>
+    var deletedObjectIDs: Set<String>
+    var boundaryStatus: FloorPlanBoundaryStatus?
+
     enum CodingKeys: String, CodingKey {
         case schemaVersion
         case appVersion
@@ -111,8 +196,12 @@ struct FloorPlanEditState: Codable {
         case cameraRotation
         case manualObjects
         case annotations
+        case coordinateConvention
+        case deletedSurfaceIDs
+        case deletedObjectIDs
+        case boundaryStatus
     }
-    
+
     init(
         schemaVersion: Int = FloorPlanEditState.currentSchemaVersion,
         appVersion: String = FloorPlanEditState.currentAppVersion,
@@ -124,13 +213,18 @@ struct FloorPlanEditState: Codable {
         objects: [String: SavedObjectState],
         cameraRotation: Double,
         manualObjects: [SavedManualObjectState]? = nil,
-        annotations: [SavedAnnotationState]? = nil
+        annotations: [SavedAnnotationState]? = nil,
+        coordinateConvention: FloorPlanCoordinateConvention = .basisXZ,
+        deletedSurfaceIDs: Set<String> = [],
+        deletedObjectIDs: Set<String> = [],
+        boundaryStatus: FloorPlanBoundaryStatus? = nil
     ) {
         let now = EditStateDateFormatter.nowString()
+
         self.schemaVersion = schemaVersion
         self.appVersion = appVersion
-        self.createdAt = (createdAt?.isEmpty == false) ? createdAt! : now
-        self.modifiedAt = (modifiedAt?.isEmpty == false) ? modifiedAt! : now
+        self.createdAt = createdAt.flatMap { $0.isEmpty ? nil : $0 } ?? now
+        self.modifiedAt = modifiedAt.flatMap { $0.isEmpty ? nil : $0 } ?? now
         self.displayUnit = displayUnit
         self.calibration = calibration
         self.surfaces = surfaces
@@ -138,41 +232,334 @@ struct FloorPlanEditState: Codable {
         self.cameraRotation = cameraRotation
         self.manualObjects = manualObjects
         self.annotations = annotations
+        self.coordinateConvention = coordinateConvention
+        self.deletedSurfaceIDs = deletedSurfaceIDs
+        self.deletedObjectIDs = deletedObjectIDs
+        self.boundaryStatus = boundaryStatus
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
-        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "0.2.0"
-        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
-        self.modifiedAt = try container.decodeIfPresent(String.self, forKey: .modifiedAt) ?? ""
-        self.displayUnit = try container.decodeIfPresent(DisplayUnit.self, forKey: .displayUnit) ?? .centimeter
-        self.calibration = try container.decodeIfPresent(SavedCalibrationState.self, forKey: .calibration)
-        self.surfaces = try container.decodeIfPresent([String: SavedSurfaceState].self, forKey: .surfaces) ?? [:]
-        self.objects = try container.decodeIfPresent([String: SavedObjectState].self, forKey: .objects) ?? [:]
-        self.cameraRotation = try container.decodeIfPresent(Double.self, forKey: .cameraRotation) ?? 0.0
-        self.manualObjects = try container.decodeIfPresent([SavedManualObjectState].self, forKey: .manualObjects)
-        self.annotations = try container.decodeIfPresent([SavedAnnotationState].self, forKey: .annotations)
+
+        let version = try container.decodeIfPresent(
+            Int.self,
+            forKey: .schemaVersion
+        ) ?? 1
+
+        guard version <= Self.currentSchemaVersion else {
+            throw FloorPlanPersistenceError.unsupportedSchema(version)
+        }
+
+        guard version >= 1 else {
+            throw FloorPlanPersistenceError.invalidState(
+                "schemaVersion 必須大於或等於 1。"
+            )
+        }
+
+        schemaVersion = version
+
+        appVersion = try container.decodeIfPresent(
+            String.self,
+            forKey: .appVersion
+        ) ?? "0.2.0"
+
+        createdAt = try container.decodeIfPresent(
+            String.self,
+            forKey: .createdAt
+        ) ?? ""
+
+        modifiedAt = try container.decodeIfPresent(
+            String.self,
+            forKey: .modifiedAt
+        ) ?? ""
+
+        displayUnit = try container.decodeIfPresent(
+            DisplayUnit.self,
+            forKey: .displayUnit
+        ) ?? .centimeter
+
+        calibration = try container.decodeIfPresent(
+            SavedCalibrationState.self,
+            forKey: .calibration
+        )
+
+        surfaces = try container.decodeIfPresent(
+            [String: SavedSurfaceState].self,
+            forKey: .surfaces
+        ) ?? [:]
+
+        objects = try container.decodeIfPresent(
+            [String: SavedObjectState].self,
+            forKey: .objects
+        ) ?? [:]
+
+        cameraRotation = try container.decodeIfPresent(
+            Double.self,
+            forKey: .cameraRotation
+        ) ?? 0
+
+        manualObjects = try container.decodeIfPresent(
+            [SavedManualObjectState].self,
+            forKey: .manualObjects
+        )
+
+        annotations = try container.decodeIfPresent(
+            [SavedAnnotationState].self,
+            forKey: .annotations
+        )
+
+        coordinateConvention = try container.decodeIfPresent(
+            FloorPlanCoordinateConvention.self,
+            forKey: .coordinateConvention
+        ) ?? .legacyEulerXZ
+
+        deletedSurfaceIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .deletedSurfaceIDs
+        ) ?? []
+
+        deletedObjectIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .deletedObjectIDs
+        ) ?? []
+
+        boundaryStatus = try container.decodeIfPresent(
+            FloorPlanBoundaryStatus.self,
+            forKey: .boundaryStatus
+        )
     }
-    
+
     static func migrateIfNeeded(
         _ state: FloorPlanEditState,
         fallbackCreatedAt: Date? = nil,
-        fallbackModifiedAt: Date? = nil
+        fallbackModifiedAt: Date? = nil,
+        projectID: UUID? = nil
     ) -> FloorPlanEditState {
-        var migrated = state
-        if migrated.schemaVersion < currentSchemaVersion {
-            if migrated.createdAt.isEmpty {
-                migrated.createdAt = EditStateDateFormatter.string(from: fallbackCreatedAt ?? Date())
-            }
-            if migrated.modifiedAt.isEmpty {
-                migrated.modifiedAt = EditStateDateFormatter.string(from: fallbackModifiedAt ?? fallbackCreatedAt ?? Date())
-            }
-            migrated.schemaVersion = currentSchemaVersion
-        } else if migrated.createdAt.isEmpty {
-            migrated.createdAt = EditStateDateFormatter.string(from: fallbackCreatedAt ?? Date())
+        guard state.schemaVersion <= currentSchemaVersion else {
+            return state
         }
+
+        var migrated = state
+
+        if migrated.createdAt.isEmpty {
+            migrated.createdAt = EditStateDateFormatter.string(
+                from: fallbackCreatedAt ?? Date()
+            )
+        }
+
+        if migrated.modifiedAt.isEmpty {
+            migrated.modifiedAt = EditStateDateFormatter.string(
+                from: fallbackModifiedAt ?? fallbackCreatedAt ?? Date()
+            )
+        }
+
+        migrated.ensureStableIDs(projectID: projectID)
+        migrated.schemaVersion = currentSchemaVersion
+
         return migrated
+    }
+
+    mutating func ensureStableIDs(projectID: UUID? = nil) {
+        if var values = manualObjects {
+            for index in values.indices where values[index].id == nil {
+                values[index].id = Self.legacyStableID(
+                    projectID: projectID,
+                    kind: "manualObject",
+                    index: index
+                )
+            }
+            manualObjects = values
+        }
+
+        if var values = annotations {
+            for index in values.indices where values[index].id == nil {
+                values[index].id = Self.legacyStableID(
+                    projectID: projectID,
+                    kind: "annotation",
+                    index: index
+                )
+            }
+            annotations = values
+        }
+    }
+
+    func validateForPersistence() throws {
+        guard schemaVersion >= 1,
+              schemaVersion <= Self.currentSchemaVersion else {
+            throw FloorPlanPersistenceError.unsupportedSchema(
+                schemaVersion
+            )
+        }
+
+        guard cameraRotation.isFinite else {
+            throw FloorPlanPersistenceError.invalidState(
+                "相機角度不是有限數值。"
+            )
+        }
+
+        for (key, value) in surfaces {
+            guard UUID(uuidString: key) != nil,
+                  value.x.isFinite,
+                  value.y.isFinite,
+                  value.zRotation.isFinite,
+                  value.halfLength.isFinite,
+                  value.halfLength >= 0 else {
+                throw FloorPlanPersistenceError.invalidState(
+                    "牆面或開口資料無效。"
+                )
+            }
+
+            if let width = value.strokeWidth {
+                guard width.isFinite, width > 0 else {
+                    throw FloorPlanPersistenceError.invalidState(
+                        "畫筆線寬無效。"
+                    )
+                }
+            }
+
+            if let thickness = value.thicknessMeters {
+                guard thickness.isFinite, thickness > 0 else {
+                    throw FloorPlanPersistenceError.invalidState(
+                        "實體厚度無效。"
+                    )
+                }
+            }
+        }
+
+        for (key, value) in objects {
+            guard UUID(uuidString: key) != nil,
+                  Self.validTransform(
+                    x: value.x,
+                    y: value.y,
+                    angle: value.zRotation,
+                    xScale: value.xScale,
+                    yScale: value.yScale
+                  ) else {
+                throw FloorPlanPersistenceError.invalidState(
+                    "掃描家具資料無效。"
+                )
+            }
+        }
+
+        for key in deletedSurfaceIDs.union(deletedObjectIDs) {
+            guard UUID(uuidString: key) != nil else {
+                throw FloorPlanPersistenceError.invalidState(
+                    "刪除紀錄包含無效識別碼。"
+                )
+            }
+        }
+
+        var manualIDs = Set<UUID>()
+
+        for value in manualObjects ?? [] {
+            guard Self.validTransform(
+                x: value.x,
+                y: value.y,
+                angle: value.zRotation,
+                xScale: value.xScale,
+                yScale: value.yScale
+            ) else {
+                throw FloorPlanPersistenceError.invalidState(
+                    "手動家具資料無效。"
+                )
+            }
+
+            _ = try JSONDecoder().decode(
+                CapturedRoom.Object.Category.self,
+                from: value.categoryData
+            )
+
+            if let id = value.id,
+               !manualIDs.insert(id).inserted {
+                throw FloorPlanPersistenceError.invalidState(
+                    "手動家具識別碼重複。"
+                )
+            }
+        }
+
+        var annotationIDs = Set<UUID>()
+
+        for value in annotations ?? [] {
+            let components = [
+                value.x,
+                value.y,
+                value.zRotation,
+                value.fontSize,
+                value.red,
+                value.green,
+                value.blue,
+                value.alpha
+            ]
+
+            guard components.allSatisfy({ $0.isFinite }),
+                  value.fontSize > 0,
+                  (0...1).contains(value.red),
+                  (0...1).contains(value.green),
+                  (0...1).contains(value.blue),
+                  (0...1).contains(value.alpha) else {
+                throw FloorPlanPersistenceError.invalidState(
+                    "文字標註資料無效。"
+                )
+            }
+
+            if let id = value.id,
+               !annotationIDs.insert(id).inserted {
+                throw FloorPlanPersistenceError.invalidState(
+                    "文字標註識別碼重複。"
+                )
+            }
+        }
+
+        if let calibration {
+            guard calibration.scaleFactor.isFinite,
+                  calibration.scaleFactor > 0,
+                  calibration.referenceOriginalMeters.isFinite,
+                  calibration.referenceOriginalMeters > 0,
+                  calibration.referenceMeasuredMeters.isFinite,
+                  calibration.referenceMeasuredMeters > 0 else {
+                throw FloorPlanPersistenceError.invalidState(
+                    "比例校準資料無效。"
+                )
+            }
+        }
+    }
+
+    private static func validTransform(
+        x: Double,
+        y: Double,
+        angle: Double,
+        xScale: Double,
+        yScale: Double
+    ) -> Bool {
+        x.isFinite &&
+        y.isFinite &&
+        angle.isFinite &&
+        xScale.isFinite &&
+        yScale.isFinite &&
+        abs(xScale) > 0 &&
+        abs(yScale) > 0
+    }
+
+    private static func legacyStableID(
+        projectID: UUID?,
+        kind: String,
+        index: Int
+    ) -> UUID {
+        let namespace = projectID?.uuidString ?? "RoomPlanLegacy"
+        let seed = "\(namespace)|\(kind)|\(index)"
+        var bytes = Array(
+            SHA256.hash(data: Data(seed.utf8)).prefix(16)
+        )
+
+        bytes[6] = (bytes[6] & 0x0F) | 0x50
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 }
 
@@ -188,42 +575,145 @@ struct SavedRoomProject: Identifiable, Codable, Equatable {
     var editStateFileName: String
 }
 
+// MARK: - 本機紀錄庫：版本化資料檔與索引提交
+
 final class RoomProjectStore: ObservableObject {
     static let shared = RoomProjectStore()
-    
+
     @Published private(set) var projects: [SavedRoomProject] = []
-    
+    @Published private(set) var lastErrorMessage: String? = nil
+
     private let indexFileName = "saved_room_projects_index.json"
     private let folderName = "SavedRoomProjects"
-    
-    private var storageDirectory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let dir = docs.appendingPathComponent(folderName, isDirectory: true)
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        return dir
-    }
-    
-    private var indexURL: URL {
-        storageDirectory.appendingPathComponent(indexFileName)
-    }
-    
+    private var isIndexWritable = false
+
     init() {
-        loadIndex()
+        if Thread.isMainThread {
+            loadIndex()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.loadIndex()
+            }
+        }
     }
-    
+
+    private func requireMainThread() -> Bool {
+        guard Thread.isMainThread else {
+            let message = FloorPlanPersistenceError
+                .mainThreadRequired.localizedDescription
+
+            DispatchQueue.main.async { [weak self] in
+                self?.lastErrorMessage = message
+            }
+
+            return false
+        }
+
+        return true
+    }
+
+    private func storageDirectory() throws -> URL {
+        guard let docs = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw FloorPlanPersistenceError
+                .unavailableDocumentsDirectory
+        }
+
+        let directory = docs.appendingPathComponent(
+            folderName,
+            isDirectory: true
+        )
+
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        return directory
+    }
+
+    private func fileURL(
+        named name: String,
+        in directory: URL
+    ) throws -> URL {
+        guard !name.isEmpty,
+              name != ".",
+              name != "..",
+              !name.contains("/"),
+              !name.contains("\\"),
+              !name.contains("\0"),
+              name == (name as NSString).lastPathComponent else {
+            throw FloorPlanPersistenceError.invalidFileName
+        }
+
+        return directory.appendingPathComponent(name)
+    }
+
     private func backupURL(for url: URL) -> URL {
         let name = url.lastPathComponent
-        let bakName: String
+        let backupName: String
+
         if name.hasSuffix(".json") {
-            bakName = String(name.dropLast(5)) + ".bak.json"
+            backupName = String(name.dropLast(5)) + ".bak.json"
         } else {
-            bakName = name + ".bak.json"
+            backupName = name + ".bak.json"
         }
-        return url.deletingLastPathComponent().appendingPathComponent(bakName)
+
+        return url.deletingLastPathComponent()
+            .appendingPathComponent(backupName)
     }
-    
+
+    private func validateDecodedValue<T>(_ value: T) throws {
+        if let state = value as? FloorPlanEditState {
+            try state.validateForPersistence()
+        }
+
+        if let index = value as? [SavedRoomProject] {
+            var ids = Set<UUID>()
+
+            for project in index {
+                guard ids.insert(project.id).inserted,
+                      project.areaPing.isFinite,
+                      project.areaSqm.isFinite,
+                      project.areaPing >= 0,
+                      project.areaSqm >= 0,
+                      project.createdAt.timeIntervalSince1970.isFinite,
+                      project.updatedAt.timeIntervalSince1970.isFinite else {
+                    throw FloorPlanPersistenceError.invalidState(
+                        "空間紀錄庫索引無效。"
+                    )
+                }
+
+                let directory = try storageDirectory()
+
+                _ = try fileURL(
+                    named: project.roomFileName,
+                    in: directory
+                )
+
+                _ = try fileURL(
+                    named: project.editStateFileName,
+                    in: directory
+                )
+            }
+        }
+    }
+
+    private func isUnsupportedSchema(_ error: Error) -> Bool {
+        guard let persistenceError =
+                error as? FloorPlanPersistenceError else {
+            return false
+        }
+
+        if case .unsupportedSchema = persistenceError {
+            return true
+        }
+
+        return false
+    }
+
     private func safeWrite<T: Codable>(
         _ value: T,
         to destinationURL: URL,
@@ -231,89 +721,179 @@ final class RoomProjectStore: ObservableObject {
         decoder: JSONDecoder = JSONDecoder()
     ) throws {
         let fm = FileManager.default
-        let tmpURL = destinationURL.appendingPathExtension("tmp")
-        let bakURL = backupURL(for: destinationURL)
-        let bakTmpURL = bakURL.appendingPathExtension("tmp")
-        
+        let token = UUID().uuidString
+
+        let temporaryURL = destinationURL
+            .appendingPathExtension("\(token).tmp")
+
+        let backup = backupURL(for: destinationURL)
+
         defer {
-            if fm.fileExists(atPath: tmpURL.path) {
-                try? fm.removeItem(at: tmpURL)
-            }
-            if fm.fileExists(atPath: bakTmpURL.path) {
-                try? fm.removeItem(at: bakTmpURL)
-            }
+            try? fm.removeItem(at: temporaryURL)
         }
-        
-        // 1. 新資料寫入 .tmp
+
+        try validateDecodedValue(value)
+
         let encodedData = try encoder.encode(value)
-        try encodedData.write(to: tmpURL, options: .atomic)
-        
-        // 2. 確認 .tmp 可以重新解碼
-        let verifyData = try Data(contentsOf: tmpURL)
-        _ = try decoder.decode(T.self, from: verifyData)
-        
-        // 3. 驗證通過後，先將現有原檔複製成 .bak.json（僅保留上一版，原檔暫留至替換完成）
+        try encodedData.write(to: temporaryURL, options: .atomic)
+
+        let verifiedData = try Data(contentsOf: temporaryURL)
+        let verifiedValue = try decoder.decode(
+            T.self,
+            from: verifiedData
+        )
+
+        try validateDecodedValue(verifiedValue)
+
         if fm.fileExists(atPath: destinationURL.path) {
-            if fm.fileExists(atPath: bakTmpURL.path) {
-                try? fm.removeItem(at: bakTmpURL)
-            }
-            try fm.copyItem(at: destinationURL, to: bakTmpURL)
-            if fm.fileExists(atPath: bakURL.path) {
-                _ = try fm.replaceItemAt(bakURL, withItemAt: bakTmpURL)
-            } else {
-                try fm.moveItem(at: bakTmpURL, to: bakURL)
+            let oldData = try Data(contentsOf: destinationURL)
+
+            do {
+                let oldValue = try decoder.decode(
+                    T.self,
+                    from: oldData
+                )
+
+                try validateDecodedValue(oldValue)
+
+                try oldData.write(to: backup, options: .atomic)
+            } catch {
+                if isUnsupportedSchema(error) {
+                    throw error
+                }
+
+                if let backupData = try? Data(contentsOf: backup),
+                   let backupValue = try? decoder.decode(
+                    T.self,
+                    from: backupData
+                   ) {
+                    try validateDecodedValue(backupValue)
+                }
             }
         }
-        
-        // 4. 用 .tmp 原子替換正式檔（成功後 .tmp 已被移走）
-        if fm.fileExists(atPath: destinationURL.path) {
-            _ = try fm.replaceItemAt(destinationURL, withItemAt: tmpURL)
-        } else {
-            try fm.moveItem(at: tmpURL, to: destinationURL)
-        }
+
+        try verifiedData.write(
+            to: destinationURL,
+            options: .atomic
+        )
     }
-    
+
     private func loadWithBackupFallback<T: Decodable>(
         _ type: T.Type,
         from url: URL,
         decoder: JSONDecoder = JSONDecoder()
-    ) -> T? {
-        if let data = try? Data(contentsOf: url),
-           let decoded = try? decoder.decode(type, from: data) {
+    ) throws -> T {
+        let primaryError: Error
+
+        do {
+            let data = try Data(contentsOf: url)
+            let decoded = try decoder.decode(type, from: data)
+            try validateDecodedValue(decoded)
             return decoded
+        } catch {
+            if isUnsupportedSchema(error) {
+                throw error
+            }
+
+            primaryError = error
         }
-        let bakURL = backupURL(for: url)
-        if let bakData = try? Data(contentsOf: bakURL),
-           let decoded = try? decoder.decode(type, from: bakData) {
-            print("RoomProjectStore 主檔異常，已自動從備份復原: \(bakURL.lastPathComponent)")
+
+        let backup = backupURL(for: url)
+
+        do {
+            let data = try Data(contentsOf: backup)
+            let decoded = try decoder.decode(type, from: data)
+            try validateDecodedValue(decoded)
+
+            print(
+                "RoomProjectStore 主檔異常，已自動從備份復原: \(backup.lastPathComponent)"
+            )
+
             return decoded
+        } catch {
+            if isUnsupportedSchema(error) {
+                throw error
+            }
+
+            throw primaryError
         }
-        return nil
     }
-    
+
     func loadIndex() {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        if let decoded = loadWithBackupFallback([SavedRoomProject].self, from: indexURL, decoder: decoder) {
-            projects = decoded.sorted { $0.updatedAt > $1.updatedAt }
-        } else {
-            projects = []
+        guard requireMainThread() else { return }
+
+        do {
+            let directory = try storageDirectory()
+            let indexURL = directory.appendingPathComponent(
+                indexFileName
+            )
+
+            let fm = FileManager.default
+            let hasPrimary = fm.fileExists(
+                atPath: indexURL.path
+            )
+            let hasBackup = fm.fileExists(
+                atPath: backupURL(for: indexURL).path
+            )
+
+            if !hasPrimary && !hasBackup {
+                projects = []
+                isIndexWritable = true
+                lastErrorMessage = nil
+                return
+            }
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+
+            let decoded = try loadWithBackupFallback(
+                [SavedRoomProject].self,
+                from: indexURL,
+                decoder: decoder
+            )
+
+            projects = decoded.sorted {
+                $0.updatedAt > $1.updatedAt
+            }
+
+            isIndexWritable = true
+            lastErrorMessage = nil
+        } catch {
+            isIndexWritable = false
+            lastErrorMessage = error.localizedDescription
         }
     }
-    
-    private func persistIndex() {
+
+    private func persistIndex(
+        _ proposedProjects: [SavedRoomProject]
+    ) throws {
+        let directory = try storageDirectory()
+        let indexURL = directory.appendingPathComponent(
+            indexFileName
+        )
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+
         do {
-            try safeWrite(projects, to: indexURL, encoder: encoder, decoder: decoder)
+            try safeWrite(
+                proposedProjects,
+                to: indexURL,
+                encoder: encoder,
+                decoder: decoder
+            )
         } catch {
-            print("RoomProjectStore 索引寫入失敗: \(error.localizedDescription)")
+            print(
+                "RoomProjectStore 索引寫入失敗: \(error.localizedDescription)"
+            )
+            throw error
         }
     }
-    
+
     @discardableResult
     func saveProject(
         existingID: UUID?,
@@ -324,105 +904,220 @@ final class RoomProjectStore: ObservableObject {
         capturedRoom: CapturedRoom,
         editState: FloorPlanEditState
     ) -> SavedRoomProject? {
-        let id = existingID ?? UUID()
-        let roomFile = "room_\(id.uuidString).json"
-        let editFile = "edit_\(id.uuidString).json"
-        let roomURL = storageDirectory.appendingPathComponent(roomFile)
-        let editURL = storageDirectory.appendingPathComponent(editFile)
-        
-        let now = Date()
-        let nowISO = EditStateDateFormatter.string(from: now)
-        let existingProject = projects.first(where: { $0.id == id })
-        var stateToSave = editState
-        stateToSave.schemaVersion = FloorPlanEditState.currentSchemaVersion
-        stateToSave.appVersion = FloorPlanEditState.currentAppVersion
-        if stateToSave.createdAt.isEmpty {
-            stateToSave.createdAt = existingProject.map { EditStateDateFormatter.string(from: $0.createdAt) } ?? nowISO
-        }
-        stateToSave.modifiedAt = nowISO
-        
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let decoder = JSONDecoder()
-        do {
-            try safeWrite(capturedRoom, to: roomURL, encoder: encoder, decoder: decoder)
-            try safeWrite(stateToSave, to: editURL, encoder: encoder, decoder: decoder)
-        } catch {
-            print("RoomProjectStore 存檔失敗: \(error.localizedDescription)")
+        guard requireMainThread() else { return nil }
+
+        guard isIndexWritable else {
+            lastErrorMessage = FloorPlanPersistenceError
+                .indexUnavailable.localizedDescription
             return nil
         }
-        let project: SavedRoomProject
-        if let idx = projects.firstIndex(where: { $0.id == id }) {
-            var updated = projects[idx]
-            updated.name = name
-            updated.floorLabel = floorLabel
-            updated.areaPing = areaPing
-            updated.areaSqm = areaSqm
-            updated.updatedAt = now
-            projects[idx] = updated
-            project = updated
-        } else {
-            project = SavedRoomProject(
+
+        guard areaPing.isFinite,
+              areaSqm.isFinite,
+              areaPing >= 0,
+              areaSqm >= 0 else {
+            lastErrorMessage = FloorPlanPersistenceError
+                .invalidState("面積數值無效。")
+                .localizedDescription
+            return nil
+        }
+
+        var uncommittedURLs: [URL] = []
+
+        do {
+            guard editState.schemaVersion <=
+                    FloorPlanEditState.currentSchemaVersion else {
+                throw FloorPlanPersistenceError.unsupportedSchema(
+                    editState.schemaVersion
+                )
+            }
+
+            let directory = try storageDirectory()
+            let id = existingID ?? UUID()
+            let generation = UUID().uuidString
+
+            let roomFile = "room_\(id.uuidString)_\(generation).json"
+            let editFile = "edit_\(id.uuidString)_\(generation).json"
+
+            let roomURL = try fileURL(
+                named: roomFile,
+                in: directory
+            )
+
+            let editURL = try fileURL(
+                named: editFile,
+                in: directory
+            )
+
+            let now = Date()
+            let existingProject = projects.first {
+                $0.id == id
+            }
+
+            var stateToSave = FloorPlanEditState.migrateIfNeeded(
+                editState,
+                fallbackCreatedAt: existingProject?.createdAt ?? now,
+                fallbackModifiedAt: now,
+                projectID: id
+            )
+
+            stateToSave.appVersion =
+                FloorPlanEditState.currentAppVersion
+
+            stateToSave.modifiedAt =
+                EditStateDateFormatter.string(from: now)
+
+            stateToSave.ensureStableIDs(projectID: id)
+            try stateToSave.validateForPersistence()
+
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+            uncommittedURLs = [roomURL, editURL]
+
+            try safeWrite(
+                capturedRoom,
+                to: roomURL,
+                encoder: encoder
+            )
+
+            try safeWrite(
+                stateToSave,
+                to: editURL,
+                encoder: encoder
+            )
+
+            let project = SavedRoomProject(
                 id: id,
                 name: name,
                 floorLabel: floorLabel,
                 areaPing: areaPing,
                 areaSqm: areaSqm,
-                createdAt: now,
+                createdAt: existingProject?.createdAt ?? now,
                 updatedAt: now,
                 roomFileName: roomFile,
                 editStateFileName: editFile
             )
-            projects.insert(project, at: 0)
-        }
-        
-        projects.sort { $0.updatedAt > $1.updatedAt }
-        persistIndex()
-        return project
-    }
-    
-    func loadCapturedRoom(for project: SavedRoomProject) -> CapturedRoom? {
-        let url = storageDirectory.appendingPathComponent(project.roomFileName)
-        return loadWithBackupFallback(CapturedRoom.self, from: url)
-    }
-    
-    func loadEditState(for project: SavedRoomProject) -> FloorPlanEditState? {
-        let url = storageDirectory.appendingPathComponent(project.editStateFileName)
-        guard let decoded = loadWithBackupFallback(FloorPlanEditState.self, from: url) else {
+
+            var proposedProjects = projects
+
+            if let index = proposedProjects.firstIndex(
+                where: { $0.id == id }
+            ) {
+                proposedProjects[index] = project
+            } else {
+                proposedProjects.append(project)
+            }
+
+            proposedProjects.sort {
+                $0.updatedAt > $1.updatedAt
+            }
+
+            try persistIndex(proposedProjects)
+
+            uncommittedURLs.removeAll()
+            projects = proposedProjects
+            lastErrorMessage = nil
+
+            return project
+        } catch {
+            for url in uncommittedURLs {
+                try? FileManager.default.removeItem(at: url)
+            }
+
+            lastErrorMessage = error.localizedDescription
+
+            print(
+                "RoomProjectStore 存檔失敗: \(error.localizedDescription)"
+            )
+
             return nil
         }
-        
-        if decoded.schemaVersion < FloorPlanEditState.currentSchemaVersion {
-            let legacyBackupName = project.editStateFileName.replacingOccurrences(
-                of: ".json",
-                with: ".v\(decoded.schemaVersion).bak.json"
+    }
+
+    func loadCapturedRoom(
+        for project: SavedRoomProject
+    ) -> CapturedRoom? {
+        guard requireMainThread() else { return nil }
+
+        do {
+            let directory = try storageDirectory()
+            let url = try fileURL(
+                named: project.roomFileName,
+                in: directory
             )
-            let legacyBackupURL = storageDirectory.appendingPathComponent(legacyBackupName)
-            if FileManager.default.fileExists(atPath: url.path) &&
-               !FileManager.default.fileExists(atPath: legacyBackupURL.path) {
-                try? FileManager.default.copyItem(at: url, to: legacyBackupURL)
-            }
-            return FloorPlanEditState.migrateIfNeeded(
+
+            let room = try loadWithBackupFallback(
+                CapturedRoom.self,
+                from: url
+            )
+
+            lastErrorMessage = nil
+            return room
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func loadEditState(
+        for project: SavedRoomProject
+    ) -> FloorPlanEditState? {
+        guard requireMainThread() else { return nil }
+
+        do {
+            let directory = try storageDirectory()
+            let url = try fileURL(
+                named: project.editStateFileName,
+                in: directory
+            )
+
+            let decoded = try loadWithBackupFallback(
+                FloorPlanEditState.self,
+                from: url
+            )
+
+            let migrated = FloorPlanEditState.migrateIfNeeded(
                 decoded,
                 fallbackCreatedAt: project.createdAt,
-                fallbackModifiedAt: project.updatedAt
+                fallbackModifiedAt: project.updatedAt,
+                projectID: project.id
             )
+
+            try migrated.validateForPersistence()
+
+            lastErrorMessage = nil
+            return migrated
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return nil
         }
-        return decoded
     }
-    
+
     func deleteProject(_ project: SavedRoomProject) {
-        let fm = FileManager.default
-        let roomURL = storageDirectory.appendingPathComponent(project.roomFileName)
-        let editURL = storageDirectory.appendingPathComponent(project.editStateFileName)
-        let legacyEditURL = storageDirectory.appendingPathComponent(
-            project.editStateFileName.replacingOccurrences(of: ".json", with: ".v1.bak.json")
-        )
-        for target in [roomURL, backupURL(for: roomURL), editURL, backupURL(for: editURL), legacyEditURL] {
-            try? fm.removeItem(at: target)
+        guard requireMainThread() else { return }
+
+        guard isIndexWritable else {
+            lastErrorMessage = FloorPlanPersistenceError
+                .indexUnavailable.localizedDescription
+            return
         }
-        projects.removeAll { $0.id == project.id }
-        persistIndex()
+
+        guard projects.contains(where: { $0.id == project.id }) else {
+            return
+        }
+
+        let proposedProjects = projects.filter {
+            $0.id != project.id
+        }
+
+        do {
+            try persistIndex(proposedProjects)
+            projects = proposedProjects
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -435,97 +1130,190 @@ final class FloorPlanViewModel: ObservableObject {
     @Published var selectedType: DetailsType?
     @Published var roomOptionType: RoomOptionType?
     @Published var furnitureToAdd: CapturedRoom.Object.Category?
+
     @Published var shouldAddFurniture: Bool = false
     @Published var shouldAddText: Bool = false
     @Published var shouldShareImage: Bool = false
     @Published var shareFormat: ImageFormat? = nil
-    
+
     // 基準尺全域校準
     @Published var calibrationRequest: FloorPlanCalibrationRequest? = nil
     @Published var statusToastMessage: String? = nil
-    
+
     // 第一階段：面積坪數、空間用途、藍圖圖層開關與修圖輔助
     @Published var roomAreaSqm: Double = 0.0
     @Published var roomAreaPing: Double = 0.0
     @Published var roomUsage: String = "室內空間"
     @Published var floorLabel: String = "1F"
-    
+
     @Published var showFurniture: Bool = true
     @Published var showDimensions: Bool = true
     @Published var showFurnitureLabels: Bool = true
     @Published var showStructuralMarkers: Bool = true
-    
+
     @Published var shouldRotate90: Bool = false
     @Published var shouldRecenter: Bool = false
     @Published var shouldUndo: Bool = false
     @Published var shouldRedo: Bool = false
     @Published var canUndo: Bool = false
     @Published var canRedo: Bool = false
-    
+
     // 第二階段：專案儲存與讀取狀態
     @Published var savedProjectID: UUID? = nil
     @Published var shouldSaveProject: Bool = false
+
     var initialEditState: FloorPlanEditState? = nil
     var editStateCreatedAt: String? = nil
     var displayUnit: DisplayUnit = .centimeter
     var calibrationState: SavedCalibrationState? = nil
-    
+
+    var coordinateConvention: FloorPlanCoordinateConvention = .basisXZ
+    var deletedSurfaceIDs: Set<String> = []
+    var deletedObjectIDs: Set<String> = []
+
+    @Published private(set) var modelRevision: UInt64 = 0
+    @Published private(set) var savedRevision: UInt64 = 0
+    @Published private(set) var boundaryStatus:
+        FloorPlanBoundaryStatus = .empty
+
+    var isRoomBoundaryClosed: Bool {
+        boundaryStatus == .closed
+    }
+
     // Commit 3 (v0.3.0-beta.1)：未存檔狀態管理
     @Published var isDirty: Bool = false
     @Published var shouldDismissAfterSave: Bool = false
     @Published var didCompleteSaveForDismiss: Bool = false
-    
+
+    // Commit 5 (v0.3.0)：牆體鎖定（操作偏好，不納入幾何資料）
+    @Published var isWallLocked: Bool = false
+
+    private func performOnMain(
+        _ operation: @escaping () -> Void
+    ) {
+        if Thread.isMainThread {
+            operation()
+        } else {
+            DispatchQueue.main.async(execute: operation)
+        }
+    }
+
     func markDirty(reason: String) {
-        DispatchQueue.main.async {
-            if !self.isDirty {
-                self.isDirty = true
-            }
+        performOnMain { [weak self] in
+            guard let self else { return }
+
+            self.modelRevision &+= 1
+            self.isDirty = true
+
             print("[DirtyState] marked dirty: \(reason)")
         }
     }
-    
-    // Commit 5 (v0.3.0)：牆體鎖定（操作偏好，不納入幾何資料）
-    @Published var isWallLocked: Bool = false
-    
-    func setWallLocked(_ locked: Bool) {
-        let applyUpdate = {
-            if self.isWallLocked == locked { return }
-            self.isWallLocked = locked
-            if let pid = self.savedProjectID {
-                UserDefaults.standard.set(locked, forKey: "wall_locked_\(pid.uuidString)")
+
+    func clearDirty(
+        ifRevisionMatches revision: UInt64? = nil
+    ) {
+        performOnMain { [weak self] in
+            guard let self else { return }
+
+            if let revision,
+               revision != self.modelRevision {
+                return
             }
-        }
-        if Thread.isMainThread {
-            applyUpdate()
-        } else {
-            DispatchQueue.main.async(execute: applyUpdate)
+
+            self.savedRevision = self.modelRevision
+            self.isDirty = false
         }
     }
-    
+
+    func updateBoundaryResult(
+        _ result: FloorPlanBoundaryResult,
+        revision: UInt64
+    ) {
+        performOnMain { [weak self] in
+            guard let self,
+                  revision == self.modelRevision else {
+                return
+            }
+
+            self.boundaryStatus = result.status
+
+            if result.status == .closed,
+               let area = result.areaSquareMeters {
+                self.roomAreaSqm = area
+                self.roomAreaPing = area * 0.3025
+            } else {
+                self.roomAreaSqm = 0
+                self.roomAreaPing = 0
+            }
+        }
+    }
+
+    func adoptSavedProject(
+        _ project: SavedRoomProject,
+        preservingWallLock: Bool = true
+    ) {
+        performOnMain { [weak self] in
+            guard let self else { return }
+
+            let previousID = self.savedProjectID
+            let previousLock = self.isWallLocked
+
+            self.savedProjectID = project.id
+
+            if preservingWallLock {
+                self.isWallLocked = previousLock
+
+                UserDefaults.standard.set(
+                    previousLock,
+                    forKey: "wall_locked_\(project.id.uuidString)"
+                )
+            } else if previousID != project.id {
+                self.loadWallLockPreference(for: project.id)
+            }
+        }
+    }
+
+    func setWallLocked(_ locked: Bool) {
+        performOnMain { [weak self] in
+            guard let self,
+                  self.isWallLocked != locked else {
+                return
+            }
+
+            self.isWallLocked = locked
+
+            if let projectID = self.savedProjectID {
+                UserDefaults.standard.set(
+                    locked,
+                    forKey: "wall_locked_\(projectID.uuidString)"
+                )
+            }
+        }
+    }
+
     func loadWallLockPreference(for projectID: UUID?) {
-        guard let pid = projectID else { return }
-        let key = "wall_locked_\(pid.uuidString)"
-        let applyLoad = {
+        performOnMain { [weak self] in
+            guard let self else { return }
+
+            guard let projectID else {
+                self.isWallLocked = false
+                return
+            }
+
+            let key = "wall_locked_\(projectID.uuidString)"
+
             if UserDefaults.standard.object(forKey: key) != nil {
-                self.isWallLocked = UserDefaults.standard.bool(forKey: key)
+                self.isWallLocked = UserDefaults.standard.bool(
+                    forKey: key
+                )
             } else {
                 self.isWallLocked = false
             }
-        }
-        if Thread.isMainThread {
-            applyLoad()
-        } else {
-            DispatchQueue.main.async(execute: applyLoad)
-        }
-    }
-    
-    func clearDirty() {
-        DispatchQueue.main.async {
-            self.isDirty = false
         }
     }
 }
 
 extension Notification.Name {
-    static let floorPlanModelDidMutate = Notification.Name("floorPlanModelDidMutate")
+    static let floorPlanModelDidMutate =
+        Notification.Name("floorPlanModelDidMutate")
 }

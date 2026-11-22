@@ -5,66 +5,77 @@
 //  Created by Baidetskyi Yurii on 26.01.2025.
 //
 
-import SwiftUI
 import SpriteKit
+import SwiftUI
 
 struct AnnotationsDetailsView: View {
     @Binding private var selectedAnnotation: FloorPlanAnnotation?
-    
+
     @State private var newTitle = ""
     @State private var isEditingTitle = false
     @State private var isEditingSubTitle = false
     @State private var angle: CGFloat = 0
-    
+
     let mainActions: [DetailsType] = [.rotate, .delete]
-    
+
     init(selectedAnnotation: Binding<FloorPlanAnnotation?>) {
         _selectedAnnotation = selectedAnnotation
     }
-    
+
     var body: some View {
         VStack(spacing: 10) {
             headerView
-            
+
             ScrollView {
                 VStack(spacing: 10) {
                     mainActionButtonView
-                    
                     updateColorView
                 }
             }
-            
+
             Spacer()
         }
         .padding(.all, 20)
         .background(Color.teal)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .alert("編輯主標題", isPresented: $isEditingTitle, actions: {
+        .alert("編輯主標題", isPresented: $isEditingTitle) {
             TextField("輸入新標題", text: $newTitle)
             Button("儲存") {
-                selectedAnnotation?.updateTitle(newTitle)
-                NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "edit_annotation_title")
+                saveTitleIfNeeded()
             }
             Button("取消", role: .cancel) {}
-        })
-        .alert("編輯副標題", isPresented: $isEditingSubTitle, actions: {
+        }
+        .alert("編輯副標題", isPresented: $isEditingSubTitle) {
             TextField("輸入新副標題", text: $newTitle)
             Button("儲存") {
-                selectedAnnotation?.updateSubTitle(newTitle)
-                NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "edit_annotation_subtitle")
+                saveSubTitleIfNeeded()
             }
             Button("取消", role: .cancel) {}
-        })
-        .onAppear {
-            if let selectedAnnotation {
-                angle = selectedAnnotation.zRotation
-            }
+        }
+        .onAppear(perform: syncAngleFromSelection)
+        .onChange(of: selectedAnnotationIdentity) { _, _ in
+            syncAngleFromSelection()
         }
     }
 }
 
-// MARK: Views
 private extension AnnotationsDetailsView {
+    var selectedAnnotationIdentity: ObjectIdentifier? {
+        selectedAnnotation.map(ObjectIdentifier.init)
+    }
+
+    func normalizedRadians(_ value: CGFloat) -> CGFloat {
+        guard value.isFinite else { return 0 }
+        var result = value.truncatingRemainder(dividingBy: 2 * .pi)
+        if result > .pi { result -= 2 * .pi }
+        if result < -.pi { result += 2 * .pi }
+        return result
+    }
+
+    func syncAngleFromSelection() {
+        angle = normalizedRadians(selectedAnnotation?.zRotation ?? 0)
+    }
+
     func editLabelView(isEditingTitleLabel: Bool) -> some View {
         Button {
             withAnimation {
@@ -72,11 +83,13 @@ private extension AnnotationsDetailsView {
             }
         } label: {
             HStack {
-                let labelText = isEditingTitleLabel ? selectedAnnotation?.titleLabel.text : selectedAnnotation?.subtitleLabel.text
+                let labelText = isEditingTitleLabel
+                    ? selectedAnnotation?.titleLabel.text
+                    : selectedAnnotation?.subtitleLabel.text
                 Text(labelText ?? "未選取標註文字")
                     .font(.headline)
                     .foregroundStyle(.white)
-                
+
                 Image(systemName: "pencil")
                     .resizable()
                     .frame(width: 20, height: 20)
@@ -88,7 +101,7 @@ private extension AnnotationsDetailsView {
             .cornerRadius(10)
         }
     }
-    
+
     var closeButton: some View {
         Button {
             withAnimation {
@@ -101,22 +114,19 @@ private extension AnnotationsDetailsView {
                 .foregroundStyle(.white)
         }
     }
-    
+
     var headerView: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading) {
                 editLabelView(isEditingTitleLabel: true)
-                
                 editLabelView(isEditingTitleLabel: false)
-                
             }
-            
+
             Spacer()
-            
             closeButton
         }
     }
-    
+
     var mainActionButtonView: some View {
         HStack(spacing: 20) {
             ForEach(mainActions, id: \.self) { option in
@@ -136,7 +146,7 @@ private extension AnnotationsDetailsView {
                             .background(Color.white)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    
+
                     Text(option.description)
                         .font(.headline)
                         .foregroundStyle(.white)
@@ -144,13 +154,13 @@ private extension AnnotationsDetailsView {
             }
         }
     }
-    
+
     var updateColorView: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("變更文字顏色")
                 .font(.headline)
                 .foregroundStyle(.white)
-            
+
             ScrollView(.horizontal) {
                 HStack(spacing: 10) {
                     ForEach(MainColor.allCases, id: \.self) { color in
@@ -169,15 +179,12 @@ private extension AnnotationsDetailsView {
             }
         }
     }
-}
 
-// MARK: Actions
-private extension AnnotationsDetailsView {
     func closeView() {
         selectedAnnotation?.removeHighlight()
         selectedAnnotation = nil
     }
-    
+
     func editAnnotation(isEditingTitleLabel: Bool) {
         if isEditingTitleLabel {
             newTitle = selectedAnnotation?.titleLabel.text ?? ""
@@ -187,24 +194,51 @@ private extension AnnotationsDetailsView {
             isEditingSubTitle = true
         }
     }
-    
+
+    func saveTitleIfNeeded() {
+        guard let annotation = selectedAnnotation else { return }
+        let oldValue = annotation.titleLabel.text ?? ""
+        guard oldValue != newTitle,
+              let scene = annotation.scene as? FloorPlanScene else { return }
+        scene.recordUndoState()
+        annotation.updateTitle(newTitle)
+        scene.viewModel.markDirty(reason: "edit_annotation_title")
+    }
+
+    func saveSubTitleIfNeeded() {
+        guard let annotation = selectedAnnotation else { return }
+        let oldValue = annotation.subtitleLabel.text ?? ""
+        guard oldValue != newTitle,
+              let scene = annotation.scene as? FloorPlanScene else { return }
+        scene.recordUndoState()
+        annotation.updateSubTitle(newTitle)
+        scene.viewModel.markDirty(reason: "edit_annotation_subtitle")
+    }
+
     func action(for type: DetailsType) {
+        guard let annotation = selectedAnnotation else { return }
         switch type {
         case .delete:
-            selectedAnnotation?.removeFromParent(); NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "delete_annotation")
-            selectedAnnotation = nil
+            (annotation.scene as? FloorPlanScene)?.deleteAnnotation(annotation)
         case .rotate:
-            let normalizedAngle = (angle + 15).truncatingRemainder(dividingBy: 360)
-            selectedAnnotation?.updateAngle(to: normalizedAngle)
-            angle = normalizedAngle
-            NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "rotate_annotation")
-        default: break
+            guard let scene = annotation.scene as? FloorPlanScene else { return }
+            scene.recordUndoState()
+            let next = normalizedRadians(angle + .pi / 12)
+            annotation.updateAngle(to: next * 180 / .pi)
+            angle = next
+            scene.viewModel.markDirty(reason: "rotate_annotation")
+        default:
+            break
         }
     }
-    
+
     func updateColor(_ color: MainColor) {
-        selectedAnnotation?.updateColor(color.skColor)
-        NotificationCenter.default.post(name: .floorPlanModelDidMutate, object: "edit_annotation_color")
+        guard let annotation = selectedAnnotation,
+              annotation.titleLabel.fontColor != color.skColor,
+              let scene = annotation.scene as? FloorPlanScene else { return }
+        scene.recordUndoState()
+        annotation.updateColor(color.skColor)
+        scene.viewModel.markDirty(reason: "edit_annotation_color")
     }
 }
 

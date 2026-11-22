@@ -37,7 +37,7 @@ struct FloorPlanSurfaceGeometry {
         let fallback: CGFloat
         if source.category == .wall || effectiveRepresentation == .solidWall {
             fallback = 2.6
-        } else if source.category == .door || source.category == .opening {
+        } else if source.category.floorPlanIsDoor || source.category == .opening {
             fallback = 2.05
         } else {
             fallback = 1.2
@@ -64,7 +64,7 @@ struct FloorPlanSurfaceGeometry {
 
     var effectiveRepresentation: FloorPlanSurfaceRepresentation {
         if representation == .source,
-           source.category == .door,
+           source.category.floorPlanIsDoor,
            halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters {
             return .wideOpening
         }
@@ -269,7 +269,7 @@ struct FloorPlanGeometry {
             }
             let category = surface.source.category
             guard surface.effectiveRepresentation == .wideOpening ||
-                    category == .door || category == .opening || category == .window else {
+                    category.floorPlanIsDoor || category == .opening || category == .window else {
                 return nil
             }
             let segment = Self.makeWallSegment(
@@ -1029,5 +1029,14 @@ struct FloorPlanGeometry {
         let t = dot(delta, axis)
         return abs(cross(axis, delta)) <= tolerance &&
             t >= -tolerance && t <= segment.length + tolerance
+    }
+}
+
+// Door category carries an isOpen associated value. Match the case rather
+// than constructing an incomplete enum value in an equality expression.
+extension CapturedRoom.Surface.Category {
+    var floorPlanIsDoor: Bool {
+        if case .door = self { return true }
+        return false
     }
 }

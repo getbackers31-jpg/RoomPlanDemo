@@ -38,7 +38,7 @@ struct SurfaceDetailsView: View {
     private var blocksDoorConversion: Bool {
         guard let surface else { return false }
         return floorPlanViewModel.isWallLocked &&
-            surface.capturedSurface.category == .door
+            surface.capturedSurface.category.floorPlanIsDoor
     }
 
     private var blocksStructuralEditing: Bool {

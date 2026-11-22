@@ -52,7 +52,7 @@ final class FloorPlanSurface: SKNode, Identifiable {
     var halfLength: CGFloat {
         didSet {
             if representation == .source,
-               capturedSurface.category == .door,
+               capturedSurface.category.floorPlanIsDoor,
                (oldValue * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters)
                     != (halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters) {
                 clearPresentationShapes()
@@ -102,7 +102,7 @@ final class FloorPlanSurface: SKNode, Identifiable {
 extension FloorPlanSurface {
     var effectiveRepresentation: FloorPlanSurfaceRepresentation {
         if representation == .source,
-           capturedSurface.category == .door,
+           capturedSurface.category.floorPlanIsDoor,
            halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters {
             return .wideOpening
         }
@@ -110,7 +110,7 @@ extension FloorPlanSurface {
     }
 
     var isOversizedDoor: Bool {
-        capturedSurface.category == .door &&
+        capturedSurface.category.floorPlanIsDoor &&
             halfLength * 2 / pointsPerMeter > FloorPlanGeometry.oversizedDoorWidthMeters
     }
 
@@ -402,6 +402,8 @@ private extension FloorPlanSurface {
         case .window:
             drawWindow()
         case .opening:
+            break
+        case .floor:
             break
         @unknown default:
             break

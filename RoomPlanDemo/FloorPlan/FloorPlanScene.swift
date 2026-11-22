@@ -34,13 +34,12 @@ final class FloorPlanScene: SKScene {
         drawSurfaces()
         drawObjects()
         if let state = viewModel.initialEditState {
-            applyEditState(state, recalculateArea: false)
+            applyEditState(state)
         }
         recenterCamera(animated: false)
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.recalculateAreaAndExteriorDimensions()
-            self.syncUndoRedoFlags()
+            self?.recalculateAreaAndExteriorDimensions()
+            self?.syncUndoRedoFlags()
         }
     }
 
@@ -232,7 +231,7 @@ extension FloorPlanScene {
         )
     }
 
-    func applyEditState(_ input: FloorPlanEditState, recalculateArea: Bool = true) {
+    func applyEditState(_ input: FloorPlanEditState) {
         var state = FloorPlanEditState.migrateIfNeeded(
             input,
             projectID: viewModel.savedProjectID
@@ -359,9 +358,7 @@ extension FloorPlanScene {
             showFurnitureLabels: viewModel.showFurnitureLabels,
             showStructuralMarkers: viewModel.showStructuralMarkers
         )
-        if recalculateArea {
-            recalculateAreaAndExteriorDimensions()
-        }
+        recalculateAreaAndExteriorDimensions()
     }
 
     func saveCurrentProject() {
@@ -485,11 +482,8 @@ private extension FloorPlanScene {
         guard length > 0.0001 else { return true }
         let direction = CGPoint(x: vector.x / length, y: vector.y / length)
         return walls.contains { wall in
-            let lateralToleranceMeters = max(
-                wall.depthInMeters * 0.5 + 0.08,
-                0.15
-            )
-            let tolerance = DrawParameters.scalingFactor * lateralToleranceMeters
+            let tolerance = DrawParameters.scalingFactor *
+                max(wall.depthInMeters * 0.5 + 0.08, 0.15)
             let wallVector = CGPoint(x: wall.end.x - wall.start.x, y: wall.end.y - wall.start.y)
             let wallLength = hypot(wallVector.x, wallVector.y)
             guard wallLength > 0.0001 else { return false }
@@ -563,12 +557,9 @@ extension FloorPlanScene {
         let revision = viewModel.modelRevision
         let walls = currentDerivedWalls()
         updateWallJoinOverlay(with: walls)
-
         let wallOnlyResult = FloorPlanGeometry.evaluateBoundary(
-            segments: walls,
-            pointsPerMeter: DrawParameters.scalingFactor
+            segments: walls, pointsPerMeter: DrawParameters.scalingFactor
         )
-
         let evaluatedSegments: [FloorPlanWallSegment]
         let result: FloorPlanBoundaryResult
         if wallOnlyResult.status == .closed {
@@ -586,7 +577,6 @@ extension FloorPlanScene {
                 pointsPerMeter: DrawParameters.scalingFactor
             )
         }
-
         viewModel.updateBoundaryResult(result, revision: revision)
         if result.status == .closed {
             drawExteriorDimensionLines(
@@ -842,15 +832,14 @@ extension FloorPlanScene {
     }
 
     func beginContinuousEdit() {
-        guard continuousEditStart == nil else { return }
+        guard !isRestoringState, continuousEditStart == nil else { return }
         continuousEditStart = exportEditState()
     }
 
     func endContinuousEdit() {
         guard let initial = continuousEditStart else { return }
         continuousEditStart = nil
-        let current = exportEditState()
-        guard !isUndoEquivalent(initial, current) else { return }
+        guard !isUndoEquivalent(initial, exportEditState()) else { return }
         appendUndo(initial)
     }
 
@@ -875,25 +864,23 @@ extension FloorPlanScene {
     }
 
     private func appendUndo(_ state: FloorPlanEditState) {
-        if let last = undoStack.last,
-           isUndoEquivalent(last, state) {
-            return
-        }
+        if let last = undoStack.last, isUndoEquivalent(last, state) { return }
         undoStack.append(state)
-    }
         if undoStack.count > 25 { undoStack.removeFirst() }
         redoStack.removeAll()
         syncUndoRedoFlags()
     }
 
     private func syncUndoRedoFlags() {
-        viewModel.canUndo = !undoStack.isEmpty
-        viewModel.canRedo = !redoStack.isEmpty
+        let undoAvailable = !undoStack.isEmpty
+        let redoAvailable = !redoStack.isEmpty
+        if viewModel.canUndo != undoAvailable { viewModel.canUndo = undoAvailable }
+        if viewModel.canRedo != redoAvailable { viewModel.canRedo = redoAvailable }
     }
 
     func performUndo() {
+        endContinuousEdit()
         guard let previous = undoStack.popLast() else { return }
-        continuousEditStart = nil
         redoStack.append(exportEditState())
         if redoStack.count > 25 { redoStack.removeFirst() }
         viewModel.markDirty(reason: "undo")
@@ -903,8 +890,8 @@ extension FloorPlanScene {
     }
 
     func performRedo() {
+        endContinuousEdit()
         guard let next = redoStack.popLast() else { return }
-        continuousEditStart = nil
         undoStack.append(exportEditState())
         if undoStack.count > 25 { undoStack.removeFirst() }
         viewModel.markDirty(reason: "redo")
@@ -961,27 +948,22 @@ extension FloorPlanScene {
 
     func deleteSurface(_ surface: FloorPlanSurface) {
         guard surface.parent != nil else { return }
-        let convertsDoorToWall = surface.capturedSurface.category == .door
+        let convertsDoorToWall = surface.capturedSurface.category.floorPlanIsDoor
         if viewModel.isWallLocked && (surface.isProtectedByWallLock || convertsDoorToWall) {
             viewModel.statusToastMessage = "牆體已鎖定，請先解鎖再刪除或轉換牆面"
             return
         }
         if convertsDoorToWall {
-            // setRepresentation already records Undo once; do not duplicate.
+            // setRepresentation owns the single Undo and Dirty operation.
             surface.setRepresentation(.solidWall)
             surface.deselect()
-            if viewModel.selectedSurface === surface {
-                viewModel.selectedSurface = nil
-            }
-            viewModel.markDirty(reason: "delete_door_replace_wall")
+            if viewModel.selectedSurface === surface { viewModel.selectedSurface = nil }
         } else {
             recordUndoState()
             viewModel.deletedSurfaceIDs.insert(surface.capturedSurface.identifier.uuidString)
             surface.removeFromParent()
             surface.deselect()
-            if viewModel.selectedSurface === surface {
-                viewModel.selectedSurface = nil
-            }
+            if viewModel.selectedSurface === surface { viewModel.selectedSurface = nil }
             viewModel.markDirty(reason: "delete_surface")
         }
         recalculateAreaAndExteriorDimensions()
